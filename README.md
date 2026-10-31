@@ -50,12 +50,6 @@ Important variables:
 - `DATABASE_URL`
 - `NEXT_PUBLIC_API_BASE_URL`
 
-Recommended local defaults:
-
-- `AI_PROVIDER=mock` for development without a local model
-- `AI_PROVIDER=ollama` when Ollama is running locally
-- `DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/justapedia_ai`
-
 ## Backend setup
 
 From `apps/api`:
@@ -146,9 +140,7 @@ AI_PROVIDER=mock
 Best for free local LLM inference.
 
 ```env
-AI_PROVIDER=ollama
-AI_MODEL=llama3.1:8b
-OLLAMA_BASE_URL=http://localhost:11434
+
 ```
 
 ## Notes
