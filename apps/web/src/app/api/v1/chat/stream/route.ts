@@ -1,15 +1,70 @@
 import { NextRequest } from "next/server";
 
-// Fallback models when primary model encounters rate limit or downtime
+// Dual API Providers with Zero-Downtime Fallback
+const VERCEL_AI_GATEWAY_KEY =
+  process.env.VERCEL_AI_GATEWAY_KEY || process.env.AI_GATEWAY_API_KEY || "";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 
-const MODELS = [
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "google/gemma-4-31b-it:free",
-  "google/gemma-4-26b-a4b-it:free",
-  "nvidia/nemotron-3.5-lightning:free",
-  "liquid/lfm-2.5-2.6b:free",
-];
+interface ProviderConfig {
+  name: string;
+  url: string;
+  headers: Record<string, string>;
+  models: string[];
+}
+
+function getActiveProviders(): ProviderConfig[] {
+  const providers: ProviderConfig[] = [];
+
+  // Provider 1: Vercel AI Gateway (Primary if key configured)
+  if (VERCEL_AI_GATEWAY_KEY) {
+    providers.push({
+      name: "Vercel AI Gateway",
+      url: "https://ai-gateway.vercel.sh/v1/chat/completions",
+      headers: {
+        Authorization: `Bearer ${VERCEL_AI_GATEWAY_KEY}`,
+        "Content-Type": "application/json",
+      },
+      models: [
+        "meta/llama-3.3-70b",
+        "anthropic/claude-opus-5.5",
+        "google/gemini-2.0-flash",
+      ],
+    });
+  }
+
+  // Provider 2: OpenRouter API (Dual Provider)
+  if (OPENROUTER_API_KEY) {
+    providers.push({
+      name: "OpenRouter",
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://justapedia.org",
+        "X-Title": "Justapedia AI",
+      },
+      models: [
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "google/gemma-4-31b-it:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "liquid/lfm-2.5-2.6b:free",
+      ],
+    });
+  }
+
+  // Provider 3: Safety Fallback (Always active so users never experience connection dropouts)
+  providers.push({
+    name: "Justapedia High-Availability Engine",
+    url: "https://text.pollinations.ai/openai/chat/completions",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    models: ["openai", "mistral"],
+  });
+
+  return providers;
+}
 
 const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, helpful, and conversational AI assistant designed primarily to help users explore, understand, and contribute to the Justapedia knowledge ecosystem (https://justapedia.org).
 
@@ -208,7 +263,7 @@ export async function POST(req: NextRequest) {
 
       const langRule = responseLanguage
         ? `Respond completely in ${responseLanguage}.`
-        : "Detect the language of the inquiry and respond fluently in that exact same language.";
+        : "Always respond in the exact same language as the user's prompt (e.g., if the user asks in English, reply in English; if Bengali, reply in Bengali). Do not switch to another language.";
 
       const promptMessages = [
         { role: "system", content: `${SYSTEM_PROMPT}\n\n${langRule}` },
@@ -218,97 +273,91 @@ export async function POST(req: NextRequest) {
         },
       ];
 
-      // Stream from OpenRouter with model fallback
+      // Stream generation using Dual Provider Pipeline (Vercel AI Gateway -> OpenRouter -> Safety Fallback)
       controller.enqueue(
         encoder.encode(sseFormat("status", { message: "Generating answer..." }))
       );
 
       let fullAnswer = "";
       let modelSuccess = false;
-      let lastErrorMessage = "";
+      const providers = getActiveProviders();
 
-      for (const model of MODELS) {
-        try {
-          const openrouterRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-              "Content-Type": "application/json",
-              "HTTP-Referer": "https://justapedia.org",
-              "X-Title": "Justapedia AI",
-            },
-            body: JSON.stringify({
-              model,
-              messages: promptMessages,
-              stream: true,
-              temperature: 0.3,
-              max_tokens: 2048,
-            }),
-          });
+      for (const provider of providers) {
+        if (modelSuccess) break;
 
-          if (!openrouterRes.ok) {
-            const errData = await openrouterRes.json().catch(() => ({}));
-            const msg = errData?.error?.message || `HTTP ${openrouterRes.status}`;
-            lastErrorMessage = msg;
-            console.error(`Model ${model} failed with:`, msg);
-            continue;
-          }
+        for (const model of provider.models) {
+          try {
+            const res = await fetch(provider.url, {
+              method: "POST",
+              headers: provider.headers,
+              body: JSON.stringify({
+                model,
+                messages: promptMessages,
+                stream: true,
+                temperature: 0.3,
+                max_tokens: 2048,
+              }),
+            });
 
-          if (!openrouterRes.body) {
-            continue;
-          }
+            if (!res.ok) {
+              const errData = await res.json().catch(() => ({}));
+              console.warn(
+                `Provider ${provider.name} model ${model} failed (${res.status}):`,
+                errData?.error?.message || res.statusText
+              );
+              // If credit card verification required or 401/403/429, skip to next provider
+              if (res.status === 403 || res.status === 401 || res.status === 429) {
+                break;
+              }
+              continue;
+            }
 
-          const reader = openrouterRes.body.getReader();
-          const decoder = new TextDecoder();
-          let lineBuffer = "";
+            if (!res.body) continue;
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let lineBuffer = "";
 
-            lineBuffer += decoder.decode(value, { stream: true });
-            const lines = lineBuffer.split("\n");
-            lineBuffer = lines.pop() || "";
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
 
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed.startsWith("data:")) continue;
-              const jsonStr = trimmed.slice(5).trim();
-              if (jsonStr === "[DONE]") break;
+              lineBuffer += decoder.decode(value, { stream: true });
+              const lines = lineBuffer.split("\n");
+              lineBuffer = lines.pop() || "";
 
-              try {
-                const parsed = JSON.parse(jsonStr);
-                const delta = parsed.choices?.[0]?.delta?.content;
-                if (delta) {
-                  fullAnswer += delta;
-                  controller.enqueue(encoder.encode(sseFormat("chunk", { text: delta })));
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) continue;
+                const jsonStr = trimmed.slice(5).trim();
+                if (jsonStr === "[DONE]") break;
+
+                try {
+                  const parsed = JSON.parse(jsonStr);
+                  const delta = parsed.choices?.[0]?.delta?.content;
+                  if (delta) {
+                    fullAnswer += delta;
+                    controller.enqueue(encoder.encode(sseFormat("chunk", { text: delta })));
+                  }
+                } catch {
+                  // Ignore partial json parse errors
                 }
-              } catch {
-                // Ignore parse errors on partial chunks
               }
             }
-          }
 
-          if (fullAnswer.trim()) {
-            modelSuccess = true;
-            break;
+            if (fullAnswer.trim()) {
+              modelSuccess = true;
+              break;
+            }
+          } catch (err) {
+            console.error(`Error querying ${provider.name} ${model}:`, err);
           }
-        } catch {
-          // Fall through to next model
         }
       }
 
-      if (!modelSuccess) {
-        if (lastErrorMessage.toLowerCase().includes("rate limit") || lastErrorMessage.toLowerCase().includes("credits")) {
-          fullAnswer =
-            "OpenRouter daily free-tier limit reached (50/50 requests). Please wait for the daily quota reset or provide an updated OpenRouter API key with available credits.";
-        } else if (!OPENROUTER_API_KEY) {
-          fullAnswer =
-            "OPENROUTER_API_KEY is not configured in environment variables. Please add it to your project settings.";
-        } else {
-          fullAnswer =
-            `I encountered an issue connecting to the AI model (${lastErrorMessage || "Service unavailable"}). Please try again in a moment.`;
-        }
+      if (!modelSuccess && !fullAnswer.trim()) {
+        fullAnswer =
+          "I am currently experiencing higher than usual traffic. Please try asking your question again in a moment.";
         controller.enqueue(encoder.encode(sseFormat("chunk", { text: fullAnswer })));
       }
 
@@ -322,10 +371,13 @@ export async function POST(req: NextRequest) {
         sources: chunks,
       };
 
-      const suggested = chunks.length > 0 ? [
-        `What else is known about ${chunks[0].title}?`,
-        `How can I improve or edit this topic on Justapedia?`,
-      ] : [];
+      const suggested =
+        chunks.length > 0
+          ? [
+              `What else is known about ${chunks[0].title}?`,
+              `How can I improve or edit this topic on Justapedia?`,
+            ]
+          : [];
 
       controller.enqueue(
         encoder.encode(
