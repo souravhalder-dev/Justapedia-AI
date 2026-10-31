@@ -5,8 +5,10 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 
 const MODELS = [
   "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "qwen/qwen3.8-27b:free",
   "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "liquid/lfm-2.5-2.6b:free",
 ];
 
 const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, helpful, and conversational AI assistant designed primarily to help users explore, understand, and contribute to the Justapedia knowledge ecosystem (https://justapedia.org).
@@ -223,6 +225,7 @@ export async function POST(req: NextRequest) {
 
       let fullAnswer = "";
       let modelSuccess = false;
+      let lastErrorMessage = "";
 
       for (const model of MODELS) {
         try {
@@ -243,7 +246,15 @@ export async function POST(req: NextRequest) {
             }),
           });
 
-          if (!openrouterRes.ok || !openrouterRes.body) {
+          if (!openrouterRes.ok) {
+            const errData = await openrouterRes.json().catch(() => ({}));
+            const msg = errData?.error?.message || `HTTP ${openrouterRes.status}`;
+            lastErrorMessage = msg;
+            console.error(`Model ${model} failed with:`, msg);
+            continue;
+          }
+
+          if (!openrouterRes.body) {
             continue;
           }
 
@@ -288,8 +299,16 @@ export async function POST(req: NextRequest) {
       }
 
       if (!modelSuccess) {
-        fullAnswer =
-          "I encountered a temporary connection issue while querying the AI model. Please try asking again in a moment.";
+        if (lastErrorMessage.toLowerCase().includes("rate limit") || lastErrorMessage.toLowerCase().includes("credits")) {
+          fullAnswer =
+            "OpenRouter daily free-tier limit reached (50/50 requests). Please wait for the daily quota reset or provide an updated OpenRouter API key with available credits.";
+        } else if (!OPENROUTER_API_KEY) {
+          fullAnswer =
+            "OPENROUTER_API_KEY is not configured in environment variables. Please add it to your project settings.";
+        } else {
+          fullAnswer =
+            `I encountered an issue connecting to the AI model (${lastErrorMessage || "Service unavailable"}). Please try again in a moment.`;
+        }
         controller.enqueue(encoder.encode(sseFormat("chunk", { text: fullAnswer })));
       }
 
