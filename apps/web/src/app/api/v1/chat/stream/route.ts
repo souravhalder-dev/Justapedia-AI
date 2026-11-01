@@ -402,8 +402,18 @@ export async function POST(req: NextRequest) {
         ? `Respond completely in ${responseLanguage}.`
         : "Always respond in the exact same language as the user's prompt (e.g. if the user asks in English, reply in English; if Bengali, reply in Bengali).";
 
+      // Prepare previous conversation history turns (up to last 6 turns)
+      const historyTurns = history
+        .filter((h) => h.content && h.content.trim() && h.id !== userMessageId)
+        .slice(-6)
+        .map((h) => ({
+          role: (h.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+          content: h.content,
+        }));
+
       const promptMessages = [
         { role: "system", content: `${SYSTEM_PROMPT}\n\n${langRule}` },
+        ...historyTurns,
         {
           role: "user",
           content: `${contextBlock}User Question: ${sanitizedMessage}\n\nAnswer the question directly, thoroughly, and professionally.`,
