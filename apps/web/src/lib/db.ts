@@ -57,7 +57,13 @@ export interface DbSource {
   created_at: string;
 }
 
-export async function listConversations(): Promise<DbConversation[]> {
+export async function listConversations(userId?: string | null): Promise<DbConversation[]> {
+  if (userId) {
+    return queryDb<DbConversation>(
+      "SELECT id, title, user_id, created_at, updated_at FROM conversations WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 50",
+      [userId]
+    );
+  }
   return queryDb<DbConversation>(
     "SELECT id, title, user_id, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT 50"
   );

@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getConversationWithMessages, queryDb } from "@/lib/db";
+import { getAuthUser } from "@/lib/auth";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const user = await getAuthUser(req);
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
   try {
     const conversation = await getConversationWithMessages(id);
@@ -22,13 +28,18 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const user = await getAuthUser(req);
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
   const body = await req.json().catch(() => ({}));
   const title = body.title || "Updated Discussion";
   try {
     await queryDb(
-      "UPDATE conversations SET title = $1, updated_at = NOW() WHERE id = $2",
-      [title, id]
+      "UPDATE conversations SET title = $1, updated_at = NOW() WHERE id = $2 AND (user_id = $3 OR user_id IS NULL)",
+      [title, id, user.id]
     );
     return NextResponse.json({
       id,
@@ -42,12 +53,17 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const user = await getAuthUser(req);
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
   try {
-    await queryDb("DELETE FROM conversations WHERE id = $1", [id]);
+    await queryDb("DELETE FROM conversations WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)", [id, user.id]);
     return new NextResponse(null, { status: 204 });
   } catch (err) {
     console.error("Error deleting conversation:", err);

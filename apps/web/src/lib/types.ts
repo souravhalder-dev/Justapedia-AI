@@ -1,3 +1,14 @@
+export type AuthUser = {
+  id: string;
+  username: string;
+  mediawiki_user_id: number;
+};
+
+export type AuthState = {
+  authenticated: boolean;
+  user: AuthUser | null;
+};
+
 export type AnswerMode = "auto" | "grounded" | "general";
 
 export type RelatedArticle = {

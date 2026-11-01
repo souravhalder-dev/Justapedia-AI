@@ -1,4 +1,4 @@
-import type { ChatRequest, Conversation, FeedbackPayload, Message } from "./types";
+import type { AuthState, ChatRequest, Conversation, FeedbackPayload, Message } from "./types";
 
 // In browser on Vercel, if no external backend URL is specified, default to relative path ""
 // which seamlessly calls the built-in Next.js Edge/Serverless Route Handlers on Vercel.
@@ -14,14 +14,15 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers ?? {}),
     },
     cache: "no-store",
+    credentials: "include",
   });
 
   if (!response.ok) {
     const fallback = "Request failed.";
     let detail = fallback;
     try {
-      const data = (await response.json()) as { detail?: string };
-      detail = typeof data.detail === "string" ? data.detail : fallback;
+      const data = (await response.json()) as { detail?: string; error?: string };
+      detail = typeof data.detail === "string" ? data.detail : typeof data.error === "string" ? data.error : fallback;
     } catch {
       detail = fallback;
     }
@@ -33,6 +34,23 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+export function getMe(): Promise<AuthState> {
+  return apiFetch<AuthState>("/api/v1/auth/me");
+}
+
+export function login(username: string, password: string): Promise<{ success: boolean; user: AuthState["user"] }> {
+  return apiFetch<{ success: boolean; user: AuthState["user"] }>("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function logout(): Promise<{ success: boolean }> {
+  return apiFetch<{ success: boolean }>("/api/v1/auth/logout", {
+    method: "POST",
+  });
 }
 
 export function listConversations(): Promise<Conversation[]> {

@@ -22,9 +22,9 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "Justapedia AI — Ask anything",
+  title: "Justapedia AI — Official Knowledge Assistant",
   description:
-    "A source-grounded AI assistant powered by NVIDIA Nemotron. Ask any question and get accurate, cited answers from Justapedia.",
+    "Intelligent knowledge and contributor assistant for Justapedia. Ask anything, research encyclopedic topics, and collaborate with AI.",
   icons: { icon: "/favicon.ico" },
 };
 
