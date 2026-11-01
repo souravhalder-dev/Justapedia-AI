@@ -20,6 +20,9 @@ export interface LoginResult {
   error?: string;
 }
 
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
 /**
  * Authenticate directly and securely against the official Justapedia MediaWiki API
  */
@@ -35,29 +38,33 @@ export async function authenticateWithJustapedia(
   }
 
   try {
+    const headers = {
+      "User-Agent": BROWSER_USER_AGENT,
+      Accept: "application/json, text/plain, */*",
+    };
+
     // Step 1: Request login token and capture session cookies
     const tokenUrl =
       "https://justapedia.org/api.php?action=query&meta=tokens&type=login&format=json";
     const tokenRes = await fetch(tokenUrl, {
-      headers: {
-        "User-Agent":
-          "JustapediaAI/1.0 (https://ig.justapedia.org; chatbot-auth)",
-        Accept: "application/json",
-      },
+      headers,
       cache: "no-store",
     });
 
     if (!tokenRes.ok) {
+      const errText = await tokenRes.text().catch(() => "");
+      console.error(`MediaWiki token fetch failed: ${tokenRes.status}`, errText.slice(0, 300));
       return {
         success: false,
-        error: "Unable to connect to Justapedia authentication server.",
+        error: "Unable to connect to Justapedia authentication server. Please try again in a moment.",
       };
     }
 
-    const tokenData = await tokenRes.json();
-    const loginToken = tokenData.query?.tokens?.logintoken;
+    const tokenData = await tokenRes.json().catch(() => null);
+    let loginToken = tokenData?.query?.tokens?.logintoken;
 
     if (!loginToken) {
+      console.error("No login token returned from Justapedia:", tokenData);
       return {
         success: false,
         error: "Failed to obtain login token from Justapedia.",
@@ -69,12 +76,13 @@ export async function authenticateWithJustapedia(
     if (typeof tokenRes.headers.getSetCookie === "function") {
       cookieString = tokenRes.headers
         .getSetCookie()
-        .map((c) => c.split(";")[0])
+        .map((c) => c.split(";")[0].trim())
+        .filter(Boolean)
         .join("; ");
     } else {
       const single = tokenRes.headers.get("set-cookie");
       if (single) {
-        cookieString = single.split(";")[0];
+        cookieString = single.split(";")[0].trim();
       }
     }
 
@@ -87,11 +95,10 @@ export async function authenticateWithJustapedia(
       format: "json",
     });
 
-    const loginRes = await fetch("https://justapedia.org/api.php", {
+    let loginRes = await fetch("https://justapedia.org/api.php", {
       method: "POST",
       headers: {
-        "User-Agent":
-          "JustapediaAI/1.0 (https://ig.justapedia.org; chatbot-auth)",
+        ...headers,
         "Content-Type": "application/x-www-form-urlencoded",
         Cookie: cookieString,
       },
@@ -100,14 +107,46 @@ export async function authenticateWithJustapedia(
     });
 
     if (!loginRes.ok) {
+      const errText = await loginRes.text().catch(() => "");
+      console.error(`MediaWiki login POST failed: ${loginRes.status}`, errText.slice(0, 300));
       return {
         success: false,
         error: "Justapedia authentication service returned an error.",
       };
     }
 
-    const loginData = await loginRes.json();
-    const result = loginData.login?.result;
+    let loginData = await loginRes.json().catch(() => null);
+
+    // If MediaWiki responds with NeedToken, retry with the new token
+    if (loginData?.login?.result === "NeedToken" && loginData.login.token) {
+      loginToken = loginData.login.token;
+      loginParams.set("lgtoken", loginToken);
+
+      // Re-extract updated cookies if any
+      if (typeof loginRes.headers.getSetCookie === "function") {
+        const newCookies = loginRes.headers
+          .getSetCookie()
+          .map((c) => c.split(";")[0].trim())
+          .filter(Boolean)
+          .join("; ");
+        if (newCookies) cookieString = newCookies;
+      }
+
+      loginRes = await fetch("https://justapedia.org/api.php", {
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: cookieString,
+        },
+        body: loginParams.toString(),
+        cache: "no-store",
+      });
+
+      loginData = await loginRes.json().catch(() => null);
+    }
+
+    const result = loginData?.login?.result;
 
     if (result === "Success") {
       const user: AuthUser = {
@@ -119,9 +158,10 @@ export async function authenticateWithJustapedia(
 
     // Extract helpful error message from MediaWiki response
     const reason =
-      loginData.login?.reason ||
-      loginData.login?.message ||
-      "Invalid Justapedia username or password.";
+      loginData?.login?.reason ||
+      loginData?.login?.message ||
+      loginData?.error?.info ||
+      "Incorrect username or password entered. Please try again.";
 
     return { success: false, error: reason };
   } catch (err) {
