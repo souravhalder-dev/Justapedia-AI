@@ -9,72 +9,24 @@ import {
   DbMessage,
 } from "@/lib/db";
 import { getAuthUser } from "@/lib/auth";
-
-// Dual API Providers with Zero-Downtime Fallback
-const VERCEL_AI_GATEWAY_KEY =
-  process.env.VERCEL_AI_GATEWAY_KEY || process.env.AI_GATEWAY_API_KEY || "";
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
-
-interface ProviderConfig {
-  name: string;
-  url: string;
-  headers: Record<string, string>;
-  models: string[];
-}
-
-function getActiveProviders(): ProviderConfig[] {
-  const providers: ProviderConfig[] = [];
-
-  // Provider 1: Vercel AI Gateway (Primary)
-  if (VERCEL_AI_GATEWAY_KEY) {
-    providers.push({
-      name: "Vercel AI Gateway",
-      url: "https://ai-gateway.vercel.sh/v1/chat/completions",
-      headers: {
-        Authorization: `Bearer ${VERCEL_AI_GATEWAY_KEY}`,
-        "Content-Type": "application/json",
-      },
-      models: [
-        "meta/llama-3.3-70b",
-        "anthropic/claude-opus-5.5",
-        "google/gemini-2.0-flash",
-      ],
-    });
-  }
-
-  // Provider 2: OpenRouter API (Dual Provider)
-  if (OPENROUTER_API_KEY) {
-    providers.push({
-      name: "OpenRouter",
-      url: "https://openrouter.ai/api/v1/chat/completions",
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://justapedia.org",
-        "X-Title": "Justapedia AI",
-      },
-      models: [
-        "nvidia/nemotron-3-ultra-550b-a55b:free",
-        "google/gemma-4-31b-it:free",
-        "google/gemma-4-26b-a4b-it:free",
-        "nvidia/nemotron-3.5-lightning:free",
-        "liquid/lfm-2.5-2.6b:free",
-      ],
-    });
-  }
-
-  // Provider 3: High-Availability Failover (Guarantees zero-interruption uptime)
-  providers.push({
-    name: "Justapedia High-Availability Engine",
-    url: "https://text.pollinations.ai/openai/chat/completions",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    models: ["openai", "mistral"],
-  });
-
-  return providers;
-}
+import {
+  getCachedResponse,
+  setCachedResponse,
+} from "@/lib/cache";
+import {
+  getAvailableProviders,
+  classifyQueryComplexity,
+  isProviderAvailable,
+  recordProviderSuccess,
+  recordProviderFailure,
+} from "@/lib/providers";
+import {
+  searchJustapediaFast,
+  getArticleFullText,
+  parseArticleSections,
+  rerankChunks,
+  ArticleChunk,
+} from "@/lib/retrieval";
 
 const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, professional, and helpful knowledge assistant for Justapedia (https://justapedia.org). Your purpose is to help readers, researchers, editors, and contributors explore and understand knowledge in a direct, natural, and engaging style similar to ChatGPT.
 
@@ -110,66 +62,6 @@ Core Operating Principles:
 
 6. Multilingual Fluency:
 - Always respond in the EXACT SAME language as the user's question (e.g., if asked in English, reply in English; if Bengali, reply in Bengali).`;
-
-type JustapediaSearchItem = {
-  title: string;
-  snippet: string;
-  page_id: string;
-  url: string;
-  score: number;
-};
-
-type ArticleChunk = {
-  id: string;
-  title: string;
-  url: string;
-  page_id: string;
-  section_heading: string;
-  snippet: string;
-  chunk_text: string;
-  relevance_score: number;
-};
-
-// 1. Query Understanding & Entity Extraction
-function extractSearchEntities(q: string): string[] {
-  const questionWords = new Set([
-    "who", "what", "where", "when", "why", "how", "which", "whose", "whom",
-    "is", "was", "are", "were", "can", "could", "would", "should", "tell",
-    "me", "about", "explain", "describe", "define", "give", "please", "and",
-    "did", "does", "do", "the", "a", "an", "in", "on", "at", "to", "for",
-    "he", "she", "it", "they", "his", "her", "their", "its", "discover", "discovers",
-    "discovered", "find", "history", "mission"
-  ]);
-
-  const candidates: string[] = [];
-
-  // A. Capitalized sequences (Proper Nouns, e.g. "Albert Einstein", "World War II")
-  const properMatches = q.match(/[A-Z][a-zA-Z0-9]*(?:\s+[A-Z][a-zA-Z0-9]*)*/g) || [];
-  for (const m of properMatches) {
-    const trimmed = m.trim();
-    if (!questionWords.has(trimmed.toLowerCase()) && trimmed.length > 2) {
-      candidates.push(trimmed);
-    }
-  }
-
-  // B. Clean query words
-  const words = q
-    .replace(/[?.,!\"'()]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !questionWords.has(w.toLowerCase()));
-
-  if (words.length >= 2) {
-    candidates.push(words.slice(0, 2).join(" ")); // "Albert Einstein"
-  }
-  if (words.length >= 3) {
-    candidates.push(words.slice(0, 3).join(" "));
-  }
-  if (words.length > 0) {
-    candidates.push(words.join(" "));
-  }
-
-  return Array.from(new Set(candidates)).filter(Boolean);
-}
 
 function resolveSearchQuery(
   currentMessage: string,
@@ -207,350 +99,208 @@ function resolveSearchQuery(
   return trimmed;
 }
 
-// 2. Search Justapedia MediaWiki API with Direct Title + OpenSearch + Keyword Search
-async function searchJustapedia(query: string): Promise<JustapediaSearchItem[]> {
-  try {
-    const entities = extractSearchEntities(query);
-    const results: JustapediaSearchItem[] = [];
-    const seenTitles = new Set<string>();
-
-    // Stage 1: Direct Page Title Check (Fastest and Most Accurate for encyclopedic subjects)
-    for (const entity of entities) {
-      const directUrl = `https://justapedia.org/api.php?action=query&format=json&redirects=1&titles=${encodeURIComponent(
-        entity
-      )}&prop=extracts&explaintext=1`;
-      const res = await fetch(directUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "application/json",
-        },
-        next: { revalidate: 600 },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const pages = data.query?.pages || {};
-        const page = Object.values(pages)[0] as { pageid?: number; title?: string; extract?: string };
-        if (page && page.pageid && Number(page.pageid) > 0 && page.title && page.extract && page.extract.length > 50) {
-          if (!seenTitles.has(page.title.toLowerCase())) {
-            seenTitles.add(page.title.toLowerCase());
-            results.push({
-              title: page.title,
-              page_id: String(page.pageid),
-              url: `https://justapedia.org/wiki/${encodeURIComponent(page.title.replace(/ /g, "_"))}`,
-              snippet: page.extract.slice(0, 300),
-              score: 2.0, // High confidence exact title match
-            });
-            // If we found the exact named entity, return immediately
-            return results;
-          }
-        }
-      }
-    }
-
-    // Stage 2: OpenSearch Autocompletion (Matches exact prefix titles)
-    for (const entity of entities) {
-      const osParams = new URLSearchParams({
-        action: "opensearch",
-        format: "json",
-        limit: "4",
-        search: entity,
-      });
-      const osRes = await fetch(`https://justapedia.org/api.php?${osParams.toString()}`, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "application/json",
-        },
-        next: { revalidate: 300 },
-      });
-      if (osRes.ok) {
-        const osData = await osRes.json();
-        const titles: string[] = osData[1] || [];
-        const urls: string[] = osData[3] || [];
-        for (let i = 0; i < titles.length; i++) {
-          const t = titles[i];
-          if (!seenTitles.has(t.toLowerCase())) {
-            seenTitles.add(t.toLowerCase());
-            results.push({
-              title: t,
-              page_id: `page_${encodeURIComponent(t)}`,
-              url: urls[i] || `https://justapedia.org/wiki/${encodeURIComponent(t.replace(/ /g, "_"))}`,
-              snippet: `Justapedia knowledge article for ${t}`,
-              score: 1.0 - i * 0.15,
-            });
-          }
-        }
-        if (results.length > 0) return results;
-      }
-    }
-
-    // Stage 3: MediaWiki list=search with entities
-    for (const entity of entities) {
-      const params = new URLSearchParams({
-        action: "query",
-        format: "json",
-        utf8: "1",
-        list: "search",
-        srsearch: entity,
-        srlimit: "4",
-      });
-      const res = await fetch(`https://justapedia.org/api.php?${params.toString()}`, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "application/json",
-        },
-        next: { revalidate: 300 },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const search = data?.query?.search || [];
-        for (let i = 0; i < search.length; i++) {
-          const item = search[i];
-          if (!seenTitles.has(item.title.toLowerCase())) {
-            seenTitles.add(item.title.toLowerCase());
-            results.push({
-              title: item.title,
-              page_id: String(item.pageid),
-              url: `https://justapedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, "_"))}`,
-              snippet: item.snippet.replace(/<[^>]*>/g, ""),
-              score: Math.max(0.3, 0.8 - i * 0.15),
-            });
-          }
-        }
-        if (results.length > 0) return results;
-      }
-    }
-
-    return results;
-  } catch {
-    return [];
-  }
-}
-
-// 3. Smart Article Chunking (Section-Aware Extraction)
-interface SectionChunk {
-  heading: string;
-  text: string;
-}
-
-function parseArticleSections(rawText: string): SectionChunk[] {
-  const sections: SectionChunk[] = [];
-  const lines = rawText.split("\n");
-  let currentHeading = "Introduction";
-  let currentBuffer: string[] = [];
-
-  for (const line of lines) {
-    const match = line.match(/^={2,4}\s*(.+?)\s*={2,4}$/);
-    if (match) {
-      if (currentBuffer.length > 0) {
-        const body = currentBuffer.join("\n").trim();
-        if (body.length > 50) {
-          sections.push({ heading: currentHeading, text: body });
-        }
-        currentBuffer = [];
-      }
-      currentHeading = match[1].trim();
-    } else {
-      currentBuffer.push(line);
-    }
-  }
-
-  if (currentBuffer.length > 0) {
-    const body = currentBuffer.join("\n").trim();
-    if (body.length > 50) {
-      sections.push({ heading: currentHeading, text: body });
-    }
-  }
-
-  if (sections.length === 0 && rawText.trim().length > 0) {
-    sections.push({ heading: "Overview", text: rawText.trim() });
-  }
-
-  return sections;
-}
-
-async function getArticleFullText(title: string): Promise<string> {
-  try {
-    const params = new URLSearchParams({
-      action: "query",
-      format: "json",
-      utf8: "1",
-      prop: "extracts",
-      explaintext: "1",
-      redirects: "1",
-      titles: title,
-    });
-    const res = await fetch(`https://justapedia.org/api.php?${params.toString()}`, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept: "application/json",
-      },
-      next: { revalidate: 600 },
-    });
-    if (!res.ok) return "";
-    const data = await res.json();
-    const pages = data?.query?.pages || {};
-    const firstPage = Object.values(pages)[0] as { extract?: string } | undefined;
-    return firstPage?.extract || "";
-  } catch {
-    return "";
-  }
-}
-
-// 4. Reranking Layer with Semantic Relevance Validation
-function rerankChunks(
-  userQuery: string,
-  chunks: ArticleChunk[]
-): ArticleChunk[] {
-  const queryLower = userQuery.toLowerCase();
-  const queryTerms = queryLower.split(/\s+/).filter((w) => w.length > 2);
-  const entities = extractSearchEntities(userQuery).map((e) => e.toLowerCase());
-
-  return chunks
-    .map((chunk) => {
-      let score = chunk.relevance_score;
-      const titleLower = chunk.title.toLowerCase();
-      const headingLower = chunk.section_heading.toLowerCase();
-      const textLower = chunk.chunk_text.toLowerCase();
-
-      // Entity match boost
-      for (const ent of entities) {
-        if (titleLower.includes(ent)) {
-          score += 4.0;
-        }
-      }
-
-      // Query term overlap
-      let termMatches = 0;
-      for (const term of queryTerms) {
-        if (titleLower.includes(term)) {
-          score += 1.0;
-          termMatches++;
-        }
-        if (headingLower.includes(term)) score += 0.5;
-        if (textLower.includes(term)) score += 0.15;
-      }
-
-      // Filter out unrelated articles that share only 1 common word
-      if (entities.length > 0 && !entities.some((e) => titleLower.includes(e) || textLower.includes(e))) {
-        score -= 2.0;
-      }
-
-      // Demote reference/external link sections
-      if (
-        headingLower.includes("references") ||
-        headingLower.includes("external links") ||
-        headingLower.includes("see also")
-      ) {
-        score -= 1.0;
-      }
-
-      return { ...chunk, relevance_score: score };
-    })
-    .filter((c) => c.relevance_score > 0.1) // Discard low-relevance noise
-    .sort((a, b) => b.relevance_score - a.relevance_score);
-}
-
 function sseFormat(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
 export async function POST(req: NextRequest) {
-  // Enforce Justapedia User Authentication
+  const startTime = Date.now();
+
+  // 1. Backend Authorization Check
   const authUser = await getAuthUser(req);
   if (!authUser) {
     return new Response(
-      JSON.stringify({
-        error: "Authentication required. Please log in with your official Justapedia account.",
-      }),
-      { status: 401, headers: { "Content-Type": "application/json" } }
+      JSON.stringify({ error: "Authentication required. Please log in with your Justapedia account." }),
+      {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }
     );
   }
 
-  const encoder = new TextEncoder();
-  const body = await req.json();
-  const rawMessage: string = (body.message || "").trim();
-  const answerMode: string = body.answer_mode || "auto";
-  const conversationId: string = body.conversation_id || `conv_${Date.now()}`;
-  const responseLanguage: string | null = body.response_language || null;
+  const body = await req.json().catch(() => ({}));
+  const rawMessage = (body.message || "").trim();
+  const conversationId = body.conversation_id || `conv_${Date.now()}`;
+  const answerMode = body.answer_mode || "auto";
+  const responseLanguage = body.response_language || null;
 
-  // Basic Prompt Injection Protection Guardrail
-  const sanitizedMessage = rawMessage.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "");
+  if (!rawMessage) {
+    return new Response(JSON.stringify({ error: "Message is required." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
-  const conversationData = {
-    id: conversationId,
-    title: sanitizedMessage.slice(0, 60),
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
+  const sanitizedMessage = rawMessage.slice(0, 4000);
+  const userMessageId = `msg_user_${Date.now()}`;
+  const assistantMessageId = `msg_ai_${Date.now()}`;
 
-  const userMessageData = {
-    id: `msg_u_${Date.now()}`,
-    role: "user",
-    content: sanitizedMessage,
-    status: "completed",
-    created_at: new Date().toISOString(),
-    sources: [],
-  };
-
-  const assistantMessageId = `msg_a_${Date.now()}`;
-
-  const customStream = new ReadableStream({
+  const stream = new ReadableStream({
     async start(controller) {
-      // 1. Send conversation & user_message events
-      controller.enqueue(encoder.encode(sseFormat("conversation", conversationData)));
-      controller.enqueue(encoder.encode(sseFormat("user_message", userMessageData)));
+      const encoder = new TextEncoder();
 
-      // Fetch conversation history from Neon PostgreSQL for query understanding
+      // Emit conversation metadata
+      controller.enqueue(
+        encoder.encode(
+          sseFormat("conversation", {
+            id: conversationId,
+            title: sanitizedMessage.slice(0, 45),
+            created_at: new Date().toISOString(),
+          })
+        )
+      );
+
+      // Emit user message confirmation
+      controller.enqueue(
+        encoder.encode(
+          sseFormat("user_message", {
+            id: userMessageId,
+            role: "user",
+            content: sanitizedMessage,
+            status: "completed",
+            created_at: new Date().toISOString(),
+            sources: [],
+          })
+        )
+      );
+
+      // Async DB record user message
+      upsertConversation(conversationId, sanitizedMessage.slice(0, 45), authUser.id).catch(() => {});
+      saveMessage({
+        id: userMessageId,
+        conversation_id: conversationId,
+        role: "user",
+        content: sanitizedMessage,
+        status: "completed",
+      }).catch(() => {});
+
+      // ─── TIER 1 & 2 CACHE CHECK (Ultra-Fast Response) ────────────────────────
+      const cached = await getCachedResponse(sanitizedMessage, responseLanguage);
+      if (cached && cached.answer) {
+        const cacheHitTtft = Date.now() - startTime;
+        console.log(`[Cache HIT] Query: "${sanitizedMessage.slice(0, 30)}" in ${cacheHitTtft}ms`);
+
+        // Emit initial placeholder
+        controller.enqueue(
+          encoder.encode(
+            sseFormat("assistant_message", {
+              id: assistantMessageId,
+              role: "assistant",
+              content: "",
+              status: "streaming",
+              created_at: new Date().toISOString(),
+              sources: [],
+            })
+          )
+        );
+
+        // Fast progressive stream for natural UX (in chunks of ~20-30 chars)
+        const fullText = cached.answer;
+        const chunkSize = 28;
+        for (let i = 0; i < fullText.length; i += chunkSize) {
+          const slice = fullText.slice(i, i + chunkSize);
+          controller.enqueue(encoder.encode(sseFormat("chunk", { text: slice })));
+        }
+
+        const totalCacheTime = Date.now() - startTime;
+
+        // Emit final event
+        controller.enqueue(
+          encoder.encode(
+            sseFormat("final", {
+              conversation: {
+                id: conversationId,
+                title: sanitizedMessage.slice(0, 45),
+                updated_at: new Date().toISOString(),
+              },
+              message: {
+                id: assistantMessageId,
+                role: "assistant",
+                content: fullText,
+                status: "completed",
+                model: `${cached.modelUsed} (Cached)`,
+                created_at: new Date().toISOString(),
+                sources: [],
+              },
+              related_articles: cached.relatedArticles || [],
+              suggested_questions: cached.suggestedQuestions || [],
+            })
+          )
+        );
+
+        // Emit Telemetry
+        controller.enqueue(
+          encoder.encode(
+            sseFormat("telemetry", {
+              cache_hit: true,
+              ttft_ms: cacheHitTtft,
+              total_ms: totalCacheTime,
+              model: cached.modelUsed,
+              provider: "Ultra-Fast Cache",
+            })
+          )
+        );
+
+        // Save assistant message to DB
+        saveMessage({
+          id: assistantMessageId,
+          conversation_id: conversationId,
+          role: "assistant",
+          content: fullText,
+          status: "completed",
+          model: `${cached.modelUsed} (Cached)`,
+        }).catch(() => {});
+
+        controller.close();
+        return;
+      }
+
+      // ─── CACHE MISS: PARALLEL RETRIEVAL & AI INFERENCE ───────────────────────
+      controller.enqueue(
+        encoder.encode(sseFormat("status", { message: "Exploring Justapedia knowledge..." }))
+      );
+
+      // Fetch last 4 messages for conversational context
       let history: DbMessage[] = [];
       try {
         history = await queryDb<DbMessage>(
-          "SELECT id, role, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC LIMIT 6",
+          "SELECT id, conversation_id, role, content, status, model, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at DESC LIMIT 4",
           [conversationId]
         );
+        history.reverse();
       } catch {
-        // Fallback to empty history
+        history = [];
       }
 
-      // Query Understanding: rewrite follow-up queries if needed
       const resolvedQuery = resolveSearchQuery(sanitizedMessage, history);
-
-      const candidateChunks: ArticleChunk[] = [];
+      let candidateChunks: ArticleChunk[] = [];
       const relatedArticles: { title: string; url: string; snippet: string }[] = [];
 
-      // 2. Hybrid Retrieval (Live Justapedia Search + Neon Postgres Index)
       if (answerMode !== "general") {
-        controller.enqueue(
-          encoder.encode(sseFormat("status", { message: "Searching Justapedia..." }))
-        );
+        // Run Fast Search & DB Hybrid Search in Parallel
+        const [searchHits, hybridHits] = await Promise.all([
+          searchJustapediaFast(resolvedQuery),
+          searchHybridArticleChunks(resolvedQuery, 4).catch(() => []),
+        ]);
 
-        // A. Search database indexed chunks
-        const dbChunks = await searchHybridArticleChunks(resolvedQuery, 4);
-        for (const dc of dbChunks) {
+        // Integrate hybrid DB hits if available
+        for (const h of hybridHits) {
           candidateChunks.push({
-            id: dc.id,
-            title: dc.article_title,
-            url: dc.article_url,
-            page_id: dc.page_id || "",
-            section_heading: dc.section_heading || "Overview",
-            snippet: dc.content.slice(0, 300),
-            chunk_text: dc.content.slice(0, 800),
-            relevance_score: (dc.rank || 0.5) * 1.2,
+            id: h.id,
+            title: h.article_title,
+            url: h.article_url,
+            page_id: h.page_id || `page_${encodeURIComponent(h.article_title)}`,
+            section_heading: h.section_heading || "Article Extract",
+            snippet: h.content.slice(0, 300),
+            chunk_text: h.content.slice(0, 850),
+            relevance_score: 1.2 + (h.rank || 0),
           });
         }
 
-        // B. Search live Justapedia MediaWiki API
-        const searchHits = await searchJustapedia(resolvedQuery);
-
+        // Fetch section extracts for top 2 search hits in parallel
         if (searchHits.length > 0) {
-          controller.enqueue(
-            encoder.encode(sseFormat("status", { message: "Reading and indexing sources..." }))
-          );
-
-          for (const hit of searchHits.slice(0, 3)) {
+          const topHits = searchHits.slice(0, 2);
+          const extractPromises = topHits.map(async (hit) => {
             relatedArticles.push({
               title: hit.title,
               url: hit.url,
@@ -558,43 +308,47 @@ export async function POST(req: NextRequest) {
             });
 
             const fullText = await getArticleFullText(hit.title);
-            if (fullText) {
-              const sections = parseArticleSections(fullText);
-              // Take top relevant sections (intro + up to 3 others)
-              for (const [secIdx, sec] of sections.slice(0, 4).entries()) {
-                const chunkId = `chk_${hit.page_id}_${secIdx}`;
-                const chunkData: ArticleChunk = {
-                  id: chunkId,
-                  title: hit.title,
-                  url: hit.url,
-                  page_id: hit.page_id,
-                  section_heading: sec.heading,
-                  snippet: sec.text.slice(0, 300),
-                  chunk_text: sec.text.slice(0, 850),
-                  relevance_score: hit.score - secIdx * 0.1,
-                };
-                candidateChunks.push(chunkData);
+            if (!fullText) return [];
 
-                // Asynchronously index into Neon PostgreSQL article_chunks table
-                upsertArticleChunk({
-                  id: chunkId,
-                  article_title: hit.title,
-                  article_url: hit.url,
-                  page_id: hit.page_id,
-                  section_heading: sec.heading,
-                  content: sec.text,
-                }).catch(() => {});
-              }
+            const sections = parseArticleSections(fullText);
+            const chunks: ArticleChunk[] = [];
+
+            for (const [secIdx, sec] of sections.slice(0, 3).entries()) {
+              const chunkId = `chk_${hit.page_id}_${secIdx}`;
+              chunks.push({
+                id: chunkId,
+                title: hit.title,
+                url: hit.url,
+                page_id: hit.page_id,
+                section_heading: sec.heading,
+                snippet: sec.text.slice(0, 300),
+                chunk_text: sec.text.slice(0, 850),
+                relevance_score: hit.score - secIdx * 0.1,
+              });
+
+              upsertArticleChunk({
+                id: chunkId,
+                article_title: hit.title,
+                article_url: hit.url,
+                page_id: hit.page_id,
+                section_heading: sec.heading,
+                content: sec.text,
+              }).catch(() => {});
             }
+            return chunks;
+          });
+
+          const extractedArrays = await Promise.all(extractPromises);
+          for (const arr of extractedArrays) {
+            candidateChunks.push(...arr);
           }
         }
       }
 
-      // 3. Reranking Layer & Strict Subject Isolation
+      // Rerank chunks
       const allReranked = rerankChunks(resolvedQuery, candidateChunks);
       const topTitle = allReranked[0]?.title.toLowerCase();
-      
-      // If we found an exact subject article (e.g. "Albert Einstein"), isolate only relevant chunks
+
       const rerankedChunks = allReranked
         .filter((c) => {
           if (allReranked[0]?.relevance_score >= 2.0 && topTitle) {
@@ -602,14 +356,7 @@ export async function POST(req: NextRequest) {
           }
           return c.relevance_score > 0.3;
         })
-        .slice(0, 6);
-
-      const filteredRelatedArticles = relatedArticles.filter((a) => {
-        if (topTitle && allReranked[0]?.relevance_score >= 2.0) {
-          return a.title.toLowerCase() === topTitle;
-        }
-        return true;
-      });
+        .slice(0, 4);
 
       // Initial assistant message placeholder
       controller.enqueue(
@@ -620,12 +367,12 @@ export async function POST(req: NextRequest) {
             content: "",
             status: "streaming",
             created_at: new Date().toISOString(),
-            sources: rerankedChunks,
+            sources: [],
           })
         )
       );
 
-      // 4. Build Context
+      // Build Context Block
       let contextBlock = "";
       if (rerankedChunks.length > 0) {
         contextBlock =
@@ -637,37 +384,59 @@ export async function POST(req: NextRequest) {
             )
             .join("\n\n") +
           "\n```\n\n";
-      } else {
-        contextBlock =
-          "No specific Justapedia article was retrieved for this query. Provide a direct, highly accurate, and helpful encyclopedic answer using verified general knowledge.\n\n";
       }
 
       const langRule = responseLanguage
         ? `Respond completely in ${responseLanguage}.`
-        : "Always respond in the exact same language as the user's prompt (e.g., if the user asks in English, reply in English; if Bengali, reply in Bengali). Do not switch to another language.";
+        : "Always respond in the exact same language as the user's prompt (e.g. if the user asks in English, reply in English; if Bengali, reply in Bengali).";
 
       const promptMessages = [
         { role: "system", content: `${SYSTEM_PROMPT}\n\n${langRule}` },
         {
           role: "user",
-          content: `${contextBlock}User Question: ${sanitizedMessage}\n\nAnswer the question directly, thoroughly, and professionally. Use the retrieved Justapedia sources where available. If explaining a famous person or concept, detail their key life events, major theories or discoveries, and significance.`,
+          content: `${contextBlock}User Question: ${sanitizedMessage}\n\nAnswer the question directly, thoroughly, and professionally.`,
         },
       ];
 
-      // 5. Stream Generation through Dual API Pipeline
-      controller.enqueue(
-        encoder.encode(sseFormat("status", { message: "Generating answer..." }))
-      );
+      // ─── INTELLIGENT MODEL ROUTING & MULTI-PROVIDER FALLBACK ───────────────
+      const complexity = classifyQueryComplexity(sanitizedMessage, rerankedChunks.length > 0);
+      const providers = getAvailableProviders();
 
       let fullAnswer = "";
       let modelSuccess = false;
-      let usedModel = "Justapedia AI";
-      const providers = getActiveProviders();
+      let usedModelName = "Justapedia AI";
+      let usedProviderId = "unknown";
+      let ttftMs = 0;
 
       for (const provider of providers) {
         if (modelSuccess) break;
 
-        for (const model of provider.models) {
+        // Circuit breaker check
+        if (!isProviderAvailable(provider.id)) {
+          console.warn(`[Skip] Provider ${provider.name} currently in cooldown.`);
+          continue;
+        }
+
+        const modelList =
+          complexity === "simple"
+            ? [...provider.fastModels, ...provider.strongModels]
+            : [...provider.strongModels, ...provider.fastModels];
+
+        for (const model of modelList) {
+          if (modelSuccess) break;
+
+          const providerStart = Date.now();
+          const abortController = new AbortController();
+
+          // 4.5s First-Token Timeout: If no token within 4.5s, trip to next provider immediately!
+          let hasFirstToken = false;
+          const timeoutId = setTimeout(() => {
+            if (!hasFirstToken) {
+              abortController.abort();
+              console.warn(`[Timeout] ${provider.name} (${model}) did not send first token in 4.5s.`);
+            }
+          }, 4500);
+
           try {
             const res = await fetch(provider.url, {
               method: "POST",
@@ -677,23 +446,24 @@ export async function POST(req: NextRequest) {
                 messages: promptMessages,
                 stream: true,
                 temperature: 0.3,
-                max_tokens: 2048,
+                max_tokens: provider.maxTokens || 2048,
               }),
+              signal: abortController.signal,
             });
 
             if (!res.ok) {
-              const errData = await res.json().catch(() => ({}));
-              console.warn(
-                `Provider ${provider.name} model ${model} failed (${res.status}):`,
-                errData?.error?.message || res.statusText
-              );
-              if (res.status === 403 || res.status === 401 || res.status === 429) {
-                break;
-              }
+              clearTimeout(timeoutId);
+              const isRate = res.status === 429;
+              recordProviderFailure(provider.id, isRate);
+              console.warn(`Provider ${provider.name} (${model}) HTTP ${res.status}`);
+              if (isRate) break; // Break out of this provider to next one
               continue;
             }
 
-            if (!res.body) continue;
+            if (!res.body) {
+              clearTimeout(timeoutId);
+              continue;
+            }
 
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
@@ -703,116 +473,149 @@ export async function POST(req: NextRequest) {
               const { done, value } = await reader.read();
               if (done) break;
 
+              if (!hasFirstToken) {
+                hasFirstToken = true;
+                clearTimeout(timeoutId);
+                ttftMs = Date.now() - startTime;
+              }
+
               lineBuffer += decoder.decode(value, { stream: true });
               const lines = lineBuffer.split("\n");
-              lineBuffer = lines.pop() || "";
+              lineBuffer = lines.pop() ?? "";
 
               for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed.startsWith("data:")) continue;
-                const jsonStr = trimmed.slice(5).trim();
-                if (jsonStr === "[DONE]") break;
+                const trimmedLine = line.trim();
+                if (!trimmedLine || trimmedLine.startsWith(":") || trimmedLine === "data: [DONE]") {
+                  continue;
+                }
 
-                try {
-                  const parsed = JSON.parse(jsonStr);
-                  const delta = parsed.choices?.[0]?.delta?.content;
-                  if (delta) {
-                    fullAnswer += delta;
-                    controller.enqueue(encoder.encode(sseFormat("chunk", { text: delta })));
+                if (trimmedLine.startsWith("data: ")) {
+                  try {
+                    const jsonStr = trimmedLine.slice(6);
+                    const parsed = JSON.parse(jsonStr);
+                    const delta =
+                      parsed.choices?.[0]?.delta?.content ||
+                      parsed.choices?.[0]?.text ||
+                      "";
+
+                    if (delta) {
+                      fullAnswer += delta;
+                      controller.enqueue(encoder.encode(sseFormat("chunk", { text: delta })));
+                    }
+                  } catch {
+                    // Ignore malformed chunk
                   }
-                } catch {
-                  // Ignore partial chunk parse error
                 }
               }
             }
 
-            if (fullAnswer.trim()) {
+            if (fullAnswer.trim().length > 10) {
               modelSuccess = true;
-              usedModel = model;
-              break;
+              usedModelName = model;
+              usedProviderId = provider.name;
+              recordProviderSuccess(provider.id, Date.now() - providerStart, ttftMs);
             }
-          } catch (err) {
-            console.error(`Error querying ${provider.name} ${model}:`, err);
+          } catch (err: unknown) {
+            clearTimeout(timeoutId);
+            const isAbort = (err as Error)?.name === "AbortError";
+            if (!isAbort) {
+              recordProviderFailure(provider.id, false);
+            }
           }
         }
       }
 
-      if (!modelSuccess && !fullAnswer.trim()) {
+      // Robust fallback if all streaming attempts were exhausted
+      if (!modelSuccess || !fullAnswer.trim()) {
         fullAnswer =
-          "I am currently experiencing higher than usual traffic. Please try asking your question again in a moment.";
+          "I apologize, but I am experiencing high inquiry volume on the free inference clusters. Please try repeating your query in a moment.";
         controller.enqueue(encoder.encode(sseFormat("chunk", { text: fullAnswer })));
       }
 
-      // 6. Final complete message
-      const finalAssistantMessage = {
-        id: assistantMessageId,
-        role: "assistant",
-        content: fullAnswer,
-        status: "completed",
-        created_at: new Date().toISOString(),
-        sources: rerankedChunks,
-      };
+      const totalTimeMs = Date.now() - startTime;
 
-      const suggested =
-        rerankedChunks.length > 0
-          ? [
-              `What else is known about ${rerankedChunks[0].title}?`,
-              `How can I improve or edit this topic on Justapedia?`,
-            ]
-          : [];
+      // Asynchronously store to L1 and L2 Caches
+      if (modelSuccess && fullAnswer.length > 20) {
+        setCachedResponse(
+          sanitizedMessage,
+          fullAnswer,
+          [],
+          relatedArticles,
+          [],
+          usedModelName,
+          responseLanguage
+        ).catch(() => {});
+      }
 
+      // Emit final completion event
       controller.enqueue(
         encoder.encode(
           sseFormat("final", {
-            conversation: conversationData,
-            message: finalAssistantMessage,
-            related_articles: filteredRelatedArticles,
-            suggested_questions: suggested,
+            conversation: {
+              id: conversationId,
+              title: sanitizedMessage.slice(0, 45),
+              updated_at: new Date().toISOString(),
+            },
+            message: {
+              id: assistantMessageId,
+              role: "assistant",
+              content: fullAnswer,
+              status: "completed",
+              model: usedModelName,
+              created_at: new Date().toISOString(),
+              sources: [],
+            },
+            related_articles: relatedArticles,
+            suggested_questions: [],
           })
         )
       );
 
-      // 7. Persist to Neon PostgreSQL Database asynchronously
-      try {
-        await upsertConversation(conversationId, conversationData.title, authUser.id);
-        await saveMessage({
-          id: userMessageData.id,
-          conversation_id: conversationId,
-          role: "user",
-          content: sanitizedMessage,
-        });
-        await saveMessage({
-          id: assistantMessageId,
-          conversation_id: conversationId,
-          role: "assistant",
-          content: fullAnswer,
-          model: usedModel,
-        });
-        if (rerankedChunks.length > 0) {
-          await saveSources(
-            rerankedChunks.map((c) => ({
-              id: `src_${c.id}_${Date.now()}`,
-              message_id: assistantMessageId,
-              title: c.title,
-              url: c.url,
-              page_id: c.page_id,
-              snippet: c.snippet,
-              section_title: c.section_heading,
-              relevance_score: c.relevance_score,
-            }))
-          );
-        }
-      } catch (dbErr) {
-        console.error("Error saving conversation to Neon DB:", dbErr);
+      // Emit Telemetry
+      controller.enqueue(
+        encoder.encode(
+          sseFormat("telemetry", {
+            cache_hit: false,
+            ttft_ms: ttftMs || (Date.now() - startTime),
+            total_ms: totalTimeMs,
+            model: usedModelName,
+            provider: usedProviderId,
+          })
+        )
+      );
+
+      // Save assistant message and sources to DB asynchronously
+      saveMessage({
+        id: assistantMessageId,
+        conversation_id: conversationId,
+        role: "assistant",
+        content: fullAnswer,
+        status: "completed",
+        model: usedModelName,
+      }).catch(() => {});
+
+      if (rerankedChunks.length > 0) {
+        saveSources(
+          rerankedChunks.map((c) => ({
+            id: `src_${c.id}_${Date.now()}`,
+            message_id: assistantMessageId,
+            title: c.title,
+            url: c.url,
+            page_id: c.page_id,
+            snippet: c.snippet,
+            section_title: c.section_heading,
+            relevance_score: c.relevance_score,
+          }))
+        ).catch(() => {});
       }
 
       controller.close();
     },
   });
 
-  return new Response(customStream, {
+  return new Response(stream, {
     headers: {
-      "Content-Type": "text/event-stream",
+      "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",

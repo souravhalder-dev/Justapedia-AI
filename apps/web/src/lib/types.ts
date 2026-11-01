@@ -29,6 +29,14 @@ export type Source = {
   relevance_score: number;
 };
 
+export type ResponseTelemetry = {
+  cache_hit: boolean;
+  ttft_ms: number;
+  total_ms: number;
+  model: string;
+  provider: string;
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -39,6 +47,7 @@ export type Message = {
   sources: Source[];
   related_articles?: RelatedArticle[];
   suggested_questions?: string[];
+  telemetry?: ResponseTelemetry;
 };
 
 export type Conversation = {

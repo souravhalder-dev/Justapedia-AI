@@ -27,6 +27,7 @@ import type {
   ChatRequest,
   Conversation,
   Message,
+  ResponseTelemetry,
 } from "@/lib/types";
 
 // ─── Modes & Configuration ───────────────────────────────────────────────────
@@ -364,6 +365,12 @@ function MessageBubble({
               <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20">
                 <IconSparkles />
                 <span>Justapedia AI</span>
+              </span>
+            ) : null}
+            {isAI && message.telemetry ? (
+              <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-mono bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                <span>⚡</span>
+                <span>{message.telemetry.cache_hit ? "Instant Cache" : `${message.telemetry.ttft_ms}ms`}</span>
               </span>
             ) : null}
             <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
@@ -895,6 +902,13 @@ export function ChatApp() {
           if (autoSpeak && streamedText) {
             speakMsg(streamedText, fin.message.id);
           }
+        } else if (event === "telemetry") {
+          const tel = data as ResponseTelemetry;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === tempAiMsgId ? { ...m, telemetry: tel } : m
+            )
+          );
         } else if (event === "error") {
           const err = data as { message: string };
           setErrorText(err.message);
