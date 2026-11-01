@@ -1,4 +1,13 @@
 import { NextRequest } from "next/server";
+import {
+  upsertConversation,
+  saveMessage,
+  saveSources,
+  searchHybridArticleChunks,
+  upsertArticleChunk,
+  queryDb,
+  DbMessage,
+} from "@/lib/db";
 
 // Dual API Providers with Zero-Downtime Fallback
 const VERCEL_AI_GATEWAY_KEY =
@@ -15,7 +24,7 @@ interface ProviderConfig {
 function getActiveProviders(): ProviderConfig[] {
   const providers: ProviderConfig[] = [];
 
-  // Provider 1: Vercel AI Gateway (Primary if key configured)
+  // Provider 1: Vercel AI Gateway (Primary)
   if (VERCEL_AI_GATEWAY_KEY) {
     providers.push({
       name: "Vercel AI Gateway",
@@ -53,7 +62,7 @@ function getActiveProviders(): ProviderConfig[] {
     });
   }
 
-  // Provider 3: Safety Fallback (Always active so users never experience connection dropouts)
+  // Provider 3: High-Availability Failover (Guarantees zero-interruption uptime)
   providers.push({
     name: "Justapedia High-Availability Engine",
     url: "https://text.pollinations.ai/openai/chat/completions",
@@ -66,23 +75,57 @@ function getActiveProviders(): ProviderConfig[] {
   return providers;
 }
 
-const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, helpful, and conversational AI assistant designed primarily to help users explore, understand, and contribute to the Justapedia knowledge ecosystem (https://justapedia.org).
+const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, professional, and helpful knowledge assistant for Justapedia (https://justapedia.org). Your purpose is to help readers, researchers, editors, and contributors discover, understand, analyze, and explore knowledge available on Justapedia.
 
-Core Operating Principles:
-1. Adaptive Conciseness & Scope Matching:
-   - Proportional Answers: Match the length, depth, and scope of your response directly to the user's question.
-   - Short/Simple Questions: If a user asks a short, straightforward factual question (e.g., "When was X born?", "What is the capital of Y?", "Who founded Z?"), give a clear, direct, and concise answer in 1 to 3 sentences.
-   - Comprehensive Explanations: Only provide in-depth explanations, historical background, or multi-section guides when the user explicitly asks to explain, summarize, detail, compare, or when the subject genuinely demands structured elaboration.
-2. Natural Synthesis (Never Copy Verbatim):
-   - Synthesize retrieved Justapedia knowledge into your own natural phrasing. Do not copy sentences verbatim.
-3. Structure & Readability:
-   - Use Markdown headings, bullet points, and clean formatting for detailed explanations.
-4. Contributor & Editing Guidance:
-   - Guide users on article structure (Lead, Body, References, External Links), Neutral Point of View (NPOV), citation formatting (<ref>...</ref>), and wiki markup.
-5. Multilingual Fluency:
-   - Always reply in the EXACT SAME language the user asked in.
-6. Factual Accuracy:
-   - Ground your factual assertions in the retrieved Justapedia reference material when available.`;
+Your goal is not simply to generate answers. You should provide accurate, clear, well-structured, and trustworthy knowledge-based responses.
+
+Core Principles:
+
+1. Prioritize Justapedia Knowledge
+- When answering questions about a topic, first use relevant information available from Justapedia whenever possible.
+- Base your answers on available and reliable sources retrieved from Justapedia.
+- Do not invent facts, sources, articles, or citations.
+- If the requested information cannot be found or verified, clearly say so:
+  * "Based on the available information on Justapedia..."
+  * "Justapedia currently does not provide enough information to confirm this."
+  * "I could not verify this information from the available sources."
+- Never present uncertain information as a confirmed fact.
+- Provide clear references or markdown links to the related Justapedia articles whenever possible.
+
+2. Provide Professional and Natural Answers
+- Responses should feel like a knowledgeable human expert, not a robotic search engine.
+- Answer the user's actual question directly.
+- Use headings, bullet points, and tables when they improve readability.
+- Do not make short questions unnecessarily long:
+  * For simple questions (e.g. dates, definitions, locations), give concise, direct answers in 1–3 sentences.
+  * For complex questions or explanation requests, provide a structured and detailed response (Quick Answer → Explanation → Context → Related Topics).
+- Adapt the length and depth of your answer to the user's question.
+
+3. Be a Knowledge Assistant, Not Just a Chatbot
+- Help users understand information, not just retrieve it.
+- Explain complex topics in simple language, summarize articles, compare subjects, and provide historical background.
+- Support natural follow-up questions smoothly.
+
+4. Multilingual Support
+- Always respond in the EXACT SAME language as the user's question (e.g., if asked in English, reply in English; if Bengali, reply in Bengali).
+- Translate and explain concepts naturally while preserving encyclopedic accuracy.
+
+5. Support Justapedia Editors and Contributors
+- Help with improving clarity, identifying missing information, suggesting citation needs (<ref>...</ref>), detecting non-neutral language, and improving article structure.
+- Treat your suggestions as recommendations. Human editors remain responsible for reviewing and approving all changes.
+
+6. Accuracy and Uncertainty
+- Accuracy is more important than sounding confident.
+- Clearly distinguish between sourced facts and general background. Never fabricate URLs, books, authors, or citations.
+
+7. AI Safety and Human Control
+- Read-only default architecture: You may read, analyze, summarize, and suggest.
+- You must NOT independently publish, edit, or delete Justapedia articles, nor execute commands to alter the database or server.
+- Follow human authorization for all changes.
+
+8. Conversation Quality
+- Maintain conversation context and understand follow-up questions naturally.
+- Tone: Professional, friendly, intelligent, neutral, respectful.`;
 
 type JustapediaSearchItem = {
   title: string;
@@ -93,25 +136,119 @@ type JustapediaSearchItem = {
 };
 
 type ArticleChunk = {
+  id: string;
   title: string;
   url: string;
   page_id: string;
+  section_heading: string;
   snippet: string;
   chunk_text: string;
   relevance_score: number;
 };
 
+// 1. Query Understanding & Follow-Up Resolution
+function resolveSearchQuery(
+  currentMessage: string,
+  history: DbMessage[]
+): string {
+  const trimmed = currentMessage.trim();
+  const lower = trimmed.toLowerCase();
+
+  const isFollowUp =
+    lower.startsWith("what caused it") ||
+    lower.startsWith("why did it") ||
+    lower.startsWith("when was he") ||
+    lower.startsWith("when was she") ||
+    lower.startsWith("who founded it") ||
+    lower.startsWith("tell me more") ||
+    lower.startsWith("explain it") ||
+    lower.startsWith("what was his") ||
+    lower.startsWith("what was her") ||
+    lower.includes(" his ") ||
+    lower.includes(" her ") ||
+    lower.includes(" it ") ||
+    lower.length < 25;
+
+  if (isFollowUp && history.length > 0) {
+    const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
+    if (lastUserMsg) {
+      const cleanedLast = lastUserMsg.content
+        .replace(/^(who is|who was|what is|tell me about|explain)\s+/i, "")
+        .replace(/[?.,!]/g, "")
+        .trim();
+      return `${cleanedLast} ${trimmed}`;
+    }
+  }
+
+  return trimmed;
+}
+
+// 2. Search Justapedia MediaWiki API with Multi-Stage Entity Extraction
+function extractSearchKeywords(q: string): string[] {
+  const stopWords = new Set([
+    "what", "is", "are", "a", "an", "the", "who", "was", "were", "how", "why",
+    "when", "where", "tell", "me", "about", "can", "you", "explain", "and",
+    "its", "their", "his", "her", "of", "in", "on", "at", "to", "for", "with",
+    "does", "did", "do", "please", "give", "brief", "summary", "overview",
+  ]);
+  const cleaned = q.replace(/[?.,!\"'()]/g, " ");
+  const terms = cleaned.split(/\s+/).filter((w) => w.length > 1 && !stopWords.has(w.toLowerCase()));
+  return terms;
+}
+
 async function searchJustapedia(query: string): Promise<JustapediaSearchItem[]> {
   try {
-    const params = new URLSearchParams({
-      action: "query",
+    const terms = extractSearchKeywords(query);
+    const searchVariants = [
+      terms.join(" "),
+      terms.slice(0, 3).join(" "),
+      terms[0] || query,
+    ].filter(Boolean);
+
+    // Stage 1: Try MediaWiki list=search with extracted keyword variants
+    for (const term of searchVariants) {
+      const params = new URLSearchParams({
+        action: "query",
+        format: "json",
+        utf8: "1",
+        list: "search",
+        srsearch: term,
+        srlimit: "5",
+      });
+      const res = await fetch(`https://justapedia.org/api.php?${params.toString()}`, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json",
+        },
+        next: { revalidate: 300 },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const search = data?.query?.search || [];
+        if (search.length > 0) {
+          return search.map(
+            (item: { pageid: number; title: string; snippet: string }, idx: number) => ({
+              title: item.title,
+              page_id: String(item.pageid),
+              url: `https://justapedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, "_"))}`,
+              snippet: item.snippet.replace(/<[^>]*>/g, ""),
+              score: Math.max(0.3, 1 - idx * 0.15),
+            })
+          );
+        }
+      }
+    }
+
+    // Stage 2: Fallback to OpenSearch for exact title autocompletion
+    const primaryEntity = terms.slice(0, 2).join(" ") || query;
+    const osParams = new URLSearchParams({
+      action: "opensearch",
       format: "json",
-      utf8: "1",
-      list: "search",
-      srsearch: query,
-      srlimit: "3",
+      limit: "5",
+      search: primaryEntity,
     });
-    const res = await fetch(`https://justapedia.org/api.php?${params.toString()}`, {
+    const osRes = await fetch(`https://justapedia.org/api.php?${osParams.toString()}`, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -119,22 +256,73 @@ async function searchJustapedia(query: string): Promise<JustapediaSearchItem[]> 
       },
       next: { revalidate: 300 },
     });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const search = data?.query?.search || [];
-    return search.map((item: { pageid: number; title: string; snippet: string }, idx: number) => ({
-      title: item.title,
-      page_id: String(item.pageid),
-      url: `https://justapedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, "_"))}`,
-      snippet: item.snippet.replace(/<[^>]*>/g, ""),
-      score: Math.max(0.1, 1 - idx * 0.2),
-    }));
+    if (osRes.ok) {
+      const osData = await osRes.json();
+      const titles: string[] = osData[1] || [];
+      const urls: string[] = osData[3] || [];
+      if (titles.length > 0) {
+        return titles.map((title, idx) => ({
+          title,
+          page_id: `page_${encodeURIComponent(title)}`,
+          url:
+            urls[idx] ||
+            `https://justapedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`,
+          snippet: `Justapedia article for ${title}`,
+          score: Math.max(0.4, 0.9 - idx * 0.1),
+        }));
+      }
+    }
+
+    return [];
   } catch {
     return [];
   }
 }
 
-async function getArticleExtract(title: string): Promise<string> {
+// 3. Smart Article Chunking (Section-Aware Extraction)
+interface SectionChunk {
+  heading: string;
+  text: string;
+}
+
+function parseArticleSections(rawText: string): SectionChunk[] {
+  const sections: SectionChunk[] = [];
+  const lines = rawText.split("\n");
+  let currentHeading = "Introduction";
+  let currentBuffer: string[] = [];
+
+  for (const line of lines) {
+    const match = line.match(/^={2,4}\s*(.+?)\s*={2,4}$/);
+    if (match) {
+      if (currentBuffer.length > 0) {
+        const body = currentBuffer.join("\n").trim();
+        if (body.length > 50) {
+          sections.push({ heading: currentHeading, text: body });
+        }
+        currentBuffer = [];
+      }
+      currentHeading = match[1].trim();
+    } else {
+      currentBuffer.push(line);
+    }
+  }
+
+  if (currentBuffer.length > 0) {
+    const body = currentBuffer.join("\n").trim();
+    if (body.length > 50) {
+      sections.push({ heading: currentHeading, text: body });
+    }
+  }
+
+  // If no sections detected, return full text as intro
+  if (sections.length === 0 && rawText.trim().length > 0) {
+    sections.push({ heading: "Overview", text: rawText.trim() });
+  }
+
+  return sections;
+}
+
+async function getArticleFullText(title: string): Promise<string> {
   try {
     const params = new URLSearchParams({
       action: "query",
@@ -163,6 +351,46 @@ async function getArticleExtract(title: string): Promise<string> {
   }
 }
 
+// 4. Reranking Layer
+function rerankChunks(
+  userQuery: string,
+  chunks: ArticleChunk[]
+): ArticleChunk[] {
+  const queryTerms = userQuery.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+
+  return chunks
+    .map((chunk) => {
+      let score = chunk.relevance_score;
+      const titleLower = chunk.title.toLowerCase();
+      const headingLower = chunk.section_heading.toLowerCase();
+      const textLower = chunk.chunk_text.toLowerCase();
+
+      // Title match boost
+      if (titleLower.includes(userQuery.toLowerCase())) {
+        score += 1.5;
+      }
+
+      // Query term overlap boost
+      for (const term of queryTerms) {
+        if (titleLower.includes(term)) score += 0.5;
+        if (headingLower.includes(term)) score += 0.4;
+        if (textLower.includes(term)) score += 0.1;
+      }
+
+      // Demote reference/external link sections from primary answer context
+      if (
+        headingLower.includes("references") ||
+        headingLower.includes("external links") ||
+        headingLower.includes("see also")
+      ) {
+        score -= 0.5;
+      }
+
+      return { ...chunk, relevance_score: score };
+    })
+    .sort((a, b) => b.relevance_score - a.relevance_score);
+}
+
 function sseFormat(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
@@ -170,14 +398,17 @@ function sseFormat(event: string, data: unknown): string {
 export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
   const body = await req.json();
-  const message: string = (body.message || "").trim();
+  const rawMessage: string = (body.message || "").trim();
   const answerMode: string = body.answer_mode || "auto";
   const conversationId: string = body.conversation_id || `conv_${Date.now()}`;
   const responseLanguage: string | null = body.response_language || null;
 
+  // Basic Prompt Injection Protection Guardrail
+  const sanitizedMessage = rawMessage.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "");
+
   const conversationData = {
     id: conversationId,
-    title: message.slice(0, 60),
+    title: sanitizedMessage.slice(0, 60),
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -185,7 +416,7 @@ export async function POST(req: NextRequest) {
   const userMessageData = {
     id: `msg_u_${Date.now()}`,
     role: "user",
-    content: message,
+    content: sanitizedMessage,
     status: "completed",
     created_at: new Date().toISOString(),
     sources: [],
@@ -199,44 +430,94 @@ export async function POST(req: NextRequest) {
       controller.enqueue(encoder.encode(sseFormat("conversation", conversationData)));
       controller.enqueue(encoder.encode(sseFormat("user_message", userMessageData)));
 
-      const chunks: ArticleChunk[] = [];
+      // Fetch conversation history from Neon PostgreSQL for query understanding
+      let history: DbMessage[] = [];
+      try {
+        history = await queryDb<DbMessage>(
+          "SELECT id, role, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC LIMIT 6",
+          [conversationId]
+        );
+      } catch {
+        // Fallback to empty history
+      }
+
+      // Query Understanding: rewrite follow-up queries if needed
+      const resolvedQuery = resolveSearchQuery(sanitizedMessage, history);
+
+      const candidateChunks: ArticleChunk[] = [];
       const relatedArticles: { title: string; url: string; snippet: string }[] = [];
 
-      // 2. Perform retrieval if requested
+      // 2. Hybrid Retrieval (Live Justapedia Search + Neon Postgres Index)
       if (answerMode !== "general") {
         controller.enqueue(
           encoder.encode(sseFormat("status", { message: "Searching Justapedia..." }))
         );
-        const searchHits = await searchJustapedia(message);
+
+        // A. Search database indexed chunks
+        const dbChunks = await searchHybridArticleChunks(resolvedQuery, 4);
+        for (const dc of dbChunks) {
+          candidateChunks.push({
+            id: dc.id,
+            title: dc.article_title,
+            url: dc.article_url,
+            page_id: dc.page_id || "",
+            section_heading: dc.section_heading || "Overview",
+            snippet: dc.content.slice(0, 300),
+            chunk_text: dc.content.slice(0, 800),
+            relevance_score: (dc.rank || 0.5) * 1.2,
+          });
+        }
+
+        // B. Search live Justapedia MediaWiki API
+        const searchHits = await searchJustapedia(resolvedQuery);
 
         if (searchHits.length > 0) {
           controller.enqueue(
-            encoder.encode(sseFormat("status", { message: "Reading relevant sources..." }))
+            encoder.encode(sseFormat("status", { message: "Reading and indexing sources..." }))
           );
 
-          const extractPromises = searchHits.slice(0, 2).map(async (hit) => {
-            const extract = await getArticleExtract(hit.title);
-            if (extract) {
-              const snippet = extract.slice(0, 700);
-              chunks.push({
-                title: hit.title,
-                url: hit.url,
-                page_id: hit.page_id,
-                snippet: hit.snippet,
-                chunk_text: snippet,
-                relevance_score: hit.score,
-              });
-              relatedArticles.push({
-                title: hit.title,
-                url: hit.url,
-                snippet: hit.snippet,
-              });
-            }
-          });
+          for (const hit of searchHits.slice(0, 3)) {
+            relatedArticles.push({
+              title: hit.title,
+              url: hit.url,
+              snippet: hit.snippet,
+            });
 
-          await Promise.all(extractPromises);
+            const fullText = await getArticleFullText(hit.title);
+            if (fullText) {
+              const sections = parseArticleSections(fullText);
+              // Take top relevant sections (intro + up to 2 others)
+              for (const [secIdx, sec] of sections.slice(0, 3).entries()) {
+                const chunkId = `chk_${hit.page_id}_${secIdx}`;
+                const chunkData: ArticleChunk = {
+                  id: chunkId,
+                  title: hit.title,
+                  url: hit.url,
+                  page_id: hit.page_id,
+                  section_heading: sec.heading,
+                  snippet: sec.text.slice(0, 300),
+                  chunk_text: sec.text.slice(0, 850),
+                  relevance_score: hit.score - secIdx * 0.1,
+                };
+                candidateChunks.push(chunkData);
+
+                // Asynchronously index into Neon PostgreSQL article_chunks table
+                upsertArticleChunk({
+                  id: chunkId,
+                  article_title: hit.title,
+                  article_url: hit.url,
+                  page_id: hit.page_id,
+                  section_heading: sec.heading,
+                  content: sec.text,
+                }).catch(() => {});
+              }
+            }
+          }
         }
       }
+
+      // 3. Reranking Layer
+      const rerankedChunks = rerankChunks(resolvedQuery, candidateChunks).slice(0, 6);
 
       // Initial assistant message placeholder
       controller.enqueue(
@@ -247,17 +528,22 @@ export async function POST(req: NextRequest) {
             content: "",
             status: "streaming",
             created_at: new Date().toISOString(),
-            sources: chunks,
+            sources: rerankedChunks,
           })
         )
       );
 
-      // Build context & prompt
+      // 4. Build Context
       let contextBlock = "";
-      if (chunks.length > 0) {
+      if (rerankedChunks.length > 0) {
         contextBlock =
-          "Retrieved Justapedia Knowledge Sources:\n```text\n" +
-          chunks.map((c, i) => `[Source ${i + 1}: ${c.title}]\n${c.chunk_text}`).join("\n\n") +
+          "Retrieved Justapedia Verified Knowledge:\n```text\n" +
+          rerankedChunks
+            .map(
+              (c, i) =>
+                `[Source ${i + 1}: ${c.title} — Section: ${c.section_heading}]\n${c.chunk_text}`
+            )
+            .join("\n\n") +
           "\n```\n\n";
       }
 
@@ -269,17 +555,18 @@ export async function POST(req: NextRequest) {
         { role: "system", content: `${SYSTEM_PROMPT}\n\n${langRule}` },
         {
           role: "user",
-          content: `${contextBlock}User Question: ${message}\n\nProvide an accurate, naturally written response matching the user's question length.`,
+          content: `${contextBlock}User Question: ${sanitizedMessage}\n\nProvide an accurate, naturally written response matching the user's question length. Follow the core principles strictly.`,
         },
       ];
 
-      // Stream generation using Dual Provider Pipeline (Vercel AI Gateway -> OpenRouter -> Safety Fallback)
+      // 5. Stream Generation through Dual API Pipeline
       controller.enqueue(
         encoder.encode(sseFormat("status", { message: "Generating answer..." }))
       );
 
       let fullAnswer = "";
       let modelSuccess = false;
+      let usedModel = "Justapedia AI";
       const providers = getActiveProviders();
 
       for (const provider of providers) {
@@ -305,7 +592,6 @@ export async function POST(req: NextRequest) {
                 `Provider ${provider.name} model ${model} failed (${res.status}):`,
                 errData?.error?.message || res.statusText
               );
-              // If credit card verification required or 401/403/429, skip to next provider
               if (res.status === 403 || res.status === 401 || res.status === 429) {
                 break;
               }
@@ -340,13 +626,14 @@ export async function POST(req: NextRequest) {
                     controller.enqueue(encoder.encode(sseFormat("chunk", { text: delta })));
                   }
                 } catch {
-                  // Ignore partial json parse errors
+                  // Ignore partial chunk parse error
                 }
               }
             }
 
             if (fullAnswer.trim()) {
               modelSuccess = true;
+              usedModel = model;
               break;
             }
           } catch (err) {
@@ -361,20 +648,20 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(sseFormat("chunk", { text: fullAnswer })));
       }
 
-      // Final complete message
+      // 6. Final complete message
       const finalAssistantMessage = {
         id: assistantMessageId,
         role: "assistant",
         content: fullAnswer,
         status: "completed",
         created_at: new Date().toISOString(),
-        sources: chunks,
+        sources: rerankedChunks,
       };
 
       const suggested =
-        chunks.length > 0
+        rerankedChunks.length > 0
           ? [
-              `What else is known about ${chunks[0].title}?`,
+              `What else is known about ${rerankedChunks[0].title}?`,
               `How can I improve or edit this topic on Justapedia?`,
             ]
           : [];
@@ -389,6 +676,40 @@ export async function POST(req: NextRequest) {
           })
         )
       );
+
+      // 7. Persist to Neon PostgreSQL Database asynchronously
+      try {
+        await upsertConversation(conversationId, conversationData.title);
+        await saveMessage({
+          id: userMessageData.id,
+          conversation_id: conversationId,
+          role: "user",
+          content: sanitizedMessage,
+        });
+        await saveMessage({
+          id: assistantMessageId,
+          conversation_id: conversationId,
+          role: "assistant",
+          content: fullAnswer,
+          model: usedModel,
+        });
+        if (rerankedChunks.length > 0) {
+          await saveSources(
+            rerankedChunks.map((c) => ({
+              id: `src_${c.id}_${Date.now()}`,
+              message_id: assistantMessageId,
+              title: c.title,
+              url: c.url,
+              page_id: c.page_id,
+              snippet: c.snippet,
+              section_title: c.section_heading,
+              relevance_score: c.relevance_score,
+            }))
+          );
+        }
+      } catch (dbErr) {
+        console.error("Error saving conversation to Neon DB:", dbErr);
+      }
 
       controller.close();
     },
