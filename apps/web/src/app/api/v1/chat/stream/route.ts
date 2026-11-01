@@ -45,8 +45,11 @@ Core Operating Principles:
   * "Based on available information..."
 - Start DIRECTLY with the answer on the very first word!
 
-3. NO SOURCE LISTS OR CITATION SECTIONS IN TEXT:
-- DO NOT append a "Sources:", "References:", "Citations:", or "Related articles:" section at the bottom of your answer.
+3. INLINE WIKILINKS (NO BOTTOM SOURCE LISTS):
+- DO NOT append a separate "Sources:", "References:", "Citations:", or "Related articles:" section at the bottom of your answer.
+- INSTEAD, naturally wikilink key concepts, historical figures, theories, and articles to Justapedia directly within your prose!
+- Format wikilinks as standard Markdown links: [Article Title](https://justapedia.org/wiki/Article_Title) (with spaces replaced by underscores) or MediaWiki syntax [[Article Title]].
+- When you draw facts from retrieved Justapedia articles, naturally link to those article(s) at their first mention in your text (e.g. "...as developed by [Albert Einstein](https://justapedia.org/wiki/Albert_Einstein) in his work on [general relativity](https://justapedia.org/wiki/General_relativity)...").
 - Keep the output clean, natural, and conversational.
 
 4. CLEAN FORMATTING & RENDERING:
@@ -372,9 +375,16 @@ export async function POST(req: NextRequest) {
         )
       );
 
-      // Build Context Block
+      // Build Context Block with Available Justapedia Articles to Wikilink
       let contextBlock = "";
       if (rerankedChunks.length > 0) {
+        const uniqueArticles = Array.from(
+          new Map(rerankedChunks.map((c) => [c.title, c.url])).entries()
+        );
+        const articleLinksHint = uniqueArticles
+          .map(([t, u]) => `* [${t}](${u})`)
+          .join("\n");
+
         contextBlock =
           "Retrieved Justapedia Verified Knowledge:\n```text\n" +
           rerankedChunks
@@ -383,7 +393,9 @@ export async function POST(req: NextRequest) {
                 `[Source ${i + 1}: ${c.title} — Section: ${c.section_heading}]\n${c.chunk_text}`
             )
             .join("\n\n") +
-          "\n```\n\n";
+          "\n```\n\n" +
+          `Available Justapedia Articles to Wikilink:\n${articleLinksHint}\n\n` +
+          "Wikilink Instruction: Naturally embed inline markdown links [Article Title](https://justapedia.org/wiki/Article_Title) or wiki syntax [[Article Title]] when mentioning these subjects in your prose. Do not append a separate source list at the bottom.\n\n";
       }
 
       const langRule = responseLanguage

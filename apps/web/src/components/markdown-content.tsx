@@ -71,6 +71,19 @@ function sanitizeAndFormatContent(raw: string): string {
   // If text contains unescaped <br> outside code blocks, ensure it doesn't break ReactMarkdown
   cleaned = cleaned.replace(/<br\s*\/?>/gi, "\n\n");
 
+  // Convert MediaWiki-style wikilinks [[Target|Display Text]] -> [Display Text](https://justapedia.org/wiki/Target)
+  cleaned = cleaned.replace(/\[\[([^|\]\n]+)\|([^\]\n]+)\]\]/g, (_, target, display) => {
+    const slug = encodeURIComponent(target.trim().replace(/\s+/g, "_"));
+    return `[${display.trim()}](https://justapedia.org/wiki/${slug})`;
+  });
+
+  // Convert MediaWiki-style wikilinks [[Target]] -> [Target](https://justapedia.org/wiki/Target)
+  cleaned = cleaned.replace(/\[\[([^\]\n]+)\]\]/g, (_, target) => {
+    const title = target.trim();
+    const slug = encodeURIComponent(title.replace(/\s+/g, "_"));
+    return `[${title}](https://justapedia.org/wiki/${slug})`;
+  });
+
   // Remove any stray MediaWiki source markers if any leaked
   cleaned = cleaned.replace(/\[\d+\]/g, "");
 
@@ -110,15 +123,24 @@ export function MarkdownContent({ content }: { content: string }) {
             );
           },
           a({ href, children, ...props }) {
+            const isJustapedia = Boolean(href && (href.includes("justapedia.org/wiki/") || href.includes("justapedia.org")));
             return (
               <a
                 href={href}
                 target="_blank"
                 rel="noreferrer"
-                className="font-medium text-cyan-600 dark:text-cyan-400 hover:text-cyan-500 underline underline-offset-2 transition"
+                className={`font-semibold transition underline underline-offset-2 inline-flex items-baseline gap-0.5 ${
+                  isJustapedia
+                    ? "text-cyan-600 dark:text-cyan-400 hover:text-cyan-500 decoration-cyan-400/40 hover:decoration-cyan-400"
+                    : "text-blue-600 dark:text-blue-400 hover:underline"
+                }`}
+                title={isJustapedia ? "Read article on Justapedia" : undefined}
                 {...props}
               >
-                {children}
+                <span>{children}</span>
+                {isJustapedia && (
+                  <span className="text-[10px] text-cyan-500/70 select-none no-underline">↗</span>
+                )}
               </a>
             );
           },
