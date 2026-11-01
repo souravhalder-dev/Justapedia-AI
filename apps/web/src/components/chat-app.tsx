@@ -477,7 +477,8 @@ function MessageBubble({
   const [copied, setCopied] = useState(false);
   const isAI = message.role === "assistant";
   const isLive = isAI && message.status === "streaming" && isStreaming;
-  const hasSources = isAI && message.sources.length > 0;
+  const sources = message.sources ?? [];
+  const hasSources = isAI && sources.length > 0;
   const hasRelated = isAI && (message.related_articles?.length ?? 0) > 0;
   const hasSuggested = isAI && (message.suggested_questions?.length ?? 0) > 0;
 
@@ -585,7 +586,7 @@ function MessageBubble({
               className="flex w-full items-center justify-between px-4 py-2.5 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-cyan-500 transition"
             >
               <span className="flex items-center gap-2">
-                <span>Retrieved Justapedia Articles ({message.sources.length})</span>
+                <span>Retrieved Justapedia Articles ({sources.length})</span>
               </span>
               <span className={`transition-transform duration-200 ${sourcesOpen ? "rotate-180 text-cyan-400" : ""}`}>
                 <IconChevron />
@@ -593,7 +594,7 @@ function MessageBubble({
             </button>
             {sourcesOpen && (
               <div className="space-y-3 border-t border-slate-200 dark:border-slate-800 px-4 pb-4 pt-3">
-                {message.sources.map((src) => (
+                {sources.map((src) => (
                   <SourceCard key={src.id} source={src} onAction={onAction} />
                 ))}
               </div>
