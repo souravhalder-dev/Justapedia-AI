@@ -75,56 +75,40 @@ function getActiveProviders(): ProviderConfig[] {
   return providers;
 }
 
-const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, professional, and helpful knowledge assistant for Justapedia (https://justapedia.org). Your purpose is to help readers, researchers, editors, and contributors discover, understand, analyze, and explore knowledge available on Justapedia.
+const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, professional, and helpful knowledge assistant for Justapedia (https://justapedia.org). Your purpose is to help readers, researchers, editors, and contributors discover, understand, analyze, and explore knowledge.
 
-Your goal is not simply to generate answers. You should provide accurate, clear, well-structured, and trustworthy knowledge-based responses.
+Your goal is to provide accurate, clear, well-structured, and trustworthy knowledge-based responses to ANY question.
 
 Core Principles:
 
-1. Prioritize Justapedia Knowledge
-- When answering questions about a topic, first use relevant information available from Justapedia whenever possible.
-- Base your answers on available and reliable sources retrieved from Justapedia.
-- Do not invent facts, sources, articles, or citations.
-- If the requested information cannot be found or verified, clearly say so:
-  * "Based on the available information on Justapedia..."
-  * "Justapedia currently does not provide enough information to confirm this."
-  * "I could not verify this information from the available sources."
-- Never present uncertain information as a confirmed fact.
-- Provide clear references or markdown links to the related Justapedia articles whenever possible.
+1. Prioritize Justapedia Knowledge with Comprehensive General Knowledge Fallback:
+- When answering questions about a topic, prioritize relevant verified knowledge available from Justapedia whenever present.
+- Use retrieved Justapedia sources as your primary factual ground truth and cite them with clear references or markdown links.
+- If Justapedia does not contain an article on the topic, or if retrieved chunks are incomplete, seamlessly provide the answer using general verified encyclopedic knowledge.
+- CRITICAL RULE: NEVER refuse to answer a question or say "I cannot answer because retrieved sources only mention unrelated topic X". Always answer the user's question directly, accurately, and thoroughly.
 
-2. Provide Professional and Natural Answers
+2. Provide Professional and Natural Answers:
 - Responses should feel like a knowledgeable human expert, not a robotic search engine.
-- Answer the user's actual question directly.
+- Answer the user's actual question directly before adding extra details.
 - Use headings, bullet points, and tables when they improve readability.
-- Do not make short questions unnecessarily long:
-  * For simple questions (e.g. dates, definitions, locations), give concise, direct answers in 1–3 sentences.
-  * For complex questions or explanation requests, provide a structured and detailed response (Quick Answer → Explanation → Context → Related Topics).
-- Adapt the length and depth of your answer to the user's question.
+- Match answer depth to the query:
+  * For simple questions (e.g. definitions, dates, who was X), give a concise, direct answer in 1–3 sentences.
+  * For complex or explanatory questions (e.g. "What did he discover?", "Explain quantum physics", "History of..."), provide a comprehensive, structured response (Quick Summary → Major Discoveries / Facts → Significance → Related Topics).
 
-3. Be a Knowledge Assistant, Not Just a Chatbot
-- Help users understand information, not just retrieve it.
-- Explain complex topics in simple language, summarize articles, compare subjects, and provide historical background.
+3. Be a Knowledge Assistant, Not Just a Chatbot:
+- Help users understand concepts in simple language, summarize articles, compare subjects, and provide historical context.
 - Support natural follow-up questions smoothly.
 
-4. Multilingual Support
+4. Multilingual Fluency:
 - Always respond in the EXACT SAME language as the user's question (e.g., if asked in English, reply in English; if Bengali, reply in Bengali).
-- Translate and explain concepts naturally while preserving encyclopedic accuracy.
 
-5. Support Justapedia Editors and Contributors
-- Help with improving clarity, identifying missing information, suggesting citation needs (<ref>...</ref>), detecting non-neutral language, and improving article structure.
-- Treat your suggestions as recommendations. Human editors remain responsible for reviewing and approving all changes.
+5. Support Justapedia Editors and Contributors:
+- Help with improving clarity, identifying missing information, suggesting citation needs (<ref>...</ref>), detecting non-neutral language, and improving article structure. Suggestions are recommendations for human review.
 
-6. Accuracy and Uncertainty
-- Accuracy is more important than sounding confident.
-- Clearly distinguish between sourced facts and general background. Never fabricate URLs, books, authors, or citations.
+6. AI Safety and Human Control:
+- Read-only default architecture: You may read, analyze, summarize, and suggest. You must never independently edit or modify articles or system files.
 
-7. AI Safety and Human Control
-- Read-only default architecture: You may read, analyze, summarize, and suggest.
-- You must NOT independently publish, edit, or delete Justapedia articles, nor execute commands to alter the database or server.
-- Follow human authorization for all changes.
-
-8. Conversation Quality
-- Maintain conversation context and understand follow-up questions naturally.
+7. Conversation Quality:
 - Tone: Professional, friendly, intelligent, neutral, respectful.`;
 
 type JustapediaSearchItem = {
@@ -146,7 +130,47 @@ type ArticleChunk = {
   relevance_score: number;
 };
 
-// 1. Query Understanding & Follow-Up Resolution
+// 1. Query Understanding & Entity Extraction
+function extractSearchEntities(q: string): string[] {
+  const questionWords = new Set([
+    "who", "what", "where", "when", "why", "how", "which", "whose", "whom",
+    "is", "was", "are", "were", "can", "could", "would", "should", "tell",
+    "me", "about", "explain", "describe", "define", "give", "please", "and",
+    "did", "does", "do", "the", "a", "an", "in", "on", "at", "to", "for",
+    "he", "she", "it", "they", "his", "her", "their", "its", "discover", "discovers",
+    "discovered", "find", "history", "mission"
+  ]);
+
+  const candidates: string[] = [];
+
+  // A. Capitalized sequences (Proper Nouns, e.g. "Albert Einstein", "World War II")
+  const properMatches = q.match(/[A-Z][a-zA-Z0-9]*(?:\s+[A-Z][a-zA-Z0-9]*)*/g) || [];
+  for (const m of properMatches) {
+    const trimmed = m.trim();
+    if (!questionWords.has(trimmed.toLowerCase()) && trimmed.length > 2) {
+      candidates.push(trimmed);
+    }
+  }
+
+  // B. Clean query words
+  const words = q
+    .replace(/[?.,!\"'()]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !questionWords.has(w.toLowerCase()));
+
+  if (words.length >= 2) {
+    candidates.push(words.slice(0, 2).join(" ")); // "Albert Einstein"
+  }
+  if (words.length >= 3) {
+    candidates.push(words.slice(0, 3).join(" "));
+  }
+  if (words.length > 0) {
+    candidates.push(words.join(" "));
+  }
+
+  return Array.from(new Set(candidates)).filter(Boolean);
+}
+
 function resolveSearchQuery(
   currentMessage: string,
   history: DbMessage[]
@@ -183,37 +207,93 @@ function resolveSearchQuery(
   return trimmed;
 }
 
-// 2. Search Justapedia MediaWiki API with Multi-Stage Entity Extraction
-function extractSearchKeywords(q: string): string[] {
-  const stopWords = new Set([
-    "what", "is", "are", "a", "an", "the", "who", "was", "were", "how", "why",
-    "when", "where", "tell", "me", "about", "can", "you", "explain", "and",
-    "its", "their", "his", "her", "of", "in", "on", "at", "to", "for", "with",
-    "does", "did", "do", "please", "give", "brief", "summary", "overview",
-  ]);
-  const cleaned = q.replace(/[?.,!\"'()]/g, " ");
-  const terms = cleaned.split(/\s+/).filter((w) => w.length > 1 && !stopWords.has(w.toLowerCase()));
-  return terms;
-}
-
+// 2. Search Justapedia MediaWiki API with Direct Title + OpenSearch + Keyword Search
 async function searchJustapedia(query: string): Promise<JustapediaSearchItem[]> {
   try {
-    const terms = extractSearchKeywords(query);
-    const searchVariants = [
-      terms.join(" "),
-      terms.slice(0, 3).join(" "),
-      terms[0] || query,
-    ].filter(Boolean);
+    const entities = extractSearchEntities(query);
+    const results: JustapediaSearchItem[] = [];
+    const seenTitles = new Set<string>();
 
-    // Stage 1: Try MediaWiki list=search with extracted keyword variants
-    for (const term of searchVariants) {
+    // Stage 1: Direct Page Title Check (Fastest and Most Accurate for encyclopedic subjects)
+    for (const entity of entities) {
+      const directUrl = `https://justapedia.org/api.php?action=query&format=json&redirects=1&titles=${encodeURIComponent(
+        entity
+      )}&prop=extracts&explaintext=1`;
+      const res = await fetch(directUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json",
+        },
+        next: { revalidate: 600 },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const pages = data.query?.pages || {};
+        const page = Object.values(pages)[0] as { pageid?: number; title?: string; extract?: string };
+        if (page && page.pageid && Number(page.pageid) > 0 && page.title && page.extract && page.extract.length > 50) {
+          if (!seenTitles.has(page.title.toLowerCase())) {
+            seenTitles.add(page.title.toLowerCase());
+            results.push({
+              title: page.title,
+              page_id: String(page.pageid),
+              url: `https://justapedia.org/wiki/${encodeURIComponent(page.title.replace(/ /g, "_"))}`,
+              snippet: page.extract.slice(0, 300),
+              score: 2.0, // High confidence exact title match
+            });
+            // If we found the exact named entity, return immediately
+            return results;
+          }
+        }
+      }
+    }
+
+    // Stage 2: OpenSearch Autocompletion (Matches exact prefix titles)
+    for (const entity of entities) {
+      const osParams = new URLSearchParams({
+        action: "opensearch",
+        format: "json",
+        limit: "4",
+        search: entity,
+      });
+      const osRes = await fetch(`https://justapedia.org/api.php?${osParams.toString()}`, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json",
+        },
+        next: { revalidate: 300 },
+      });
+      if (osRes.ok) {
+        const osData = await osRes.json();
+        const titles: string[] = osData[1] || [];
+        const urls: string[] = osData[3] || [];
+        for (let i = 0; i < titles.length; i++) {
+          const t = titles[i];
+          if (!seenTitles.has(t.toLowerCase())) {
+            seenTitles.add(t.toLowerCase());
+            results.push({
+              title: t,
+              page_id: `page_${encodeURIComponent(t)}`,
+              url: urls[i] || `https://justapedia.org/wiki/${encodeURIComponent(t.replace(/ /g, "_"))}`,
+              snippet: `Justapedia knowledge article for ${t}`,
+              score: 1.0 - i * 0.15,
+            });
+          }
+        }
+        if (results.length > 0) return results;
+      }
+    }
+
+    // Stage 3: MediaWiki list=search with entities
+    for (const entity of entities) {
       const params = new URLSearchParams({
         action: "query",
         format: "json",
         utf8: "1",
         list: "search",
-        srsearch: term,
-        srlimit: "5",
+        srsearch: entity,
+        srlimit: "4",
       });
       const res = await fetch(`https://justapedia.org/api.php?${params.toString()}`, {
         headers: {
@@ -226,54 +306,24 @@ async function searchJustapedia(query: string): Promise<JustapediaSearchItem[]> 
       if (res.ok) {
         const data = await res.json();
         const search = data?.query?.search || [];
-        if (search.length > 0) {
-          return search.map(
-            (item: { pageid: number; title: string; snippet: string }, idx: number) => ({
+        for (let i = 0; i < search.length; i++) {
+          const item = search[i];
+          if (!seenTitles.has(item.title.toLowerCase())) {
+            seenTitles.add(item.title.toLowerCase());
+            results.push({
               title: item.title,
               page_id: String(item.pageid),
               url: `https://justapedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, "_"))}`,
               snippet: item.snippet.replace(/<[^>]*>/g, ""),
-              score: Math.max(0.3, 1 - idx * 0.15),
-            })
-          );
+              score: Math.max(0.3, 0.8 - i * 0.15),
+            });
+          }
         }
+        if (results.length > 0) return results;
       }
     }
 
-    // Stage 2: Fallback to OpenSearch for exact title autocompletion
-    const primaryEntity = terms.slice(0, 2).join(" ") || query;
-    const osParams = new URLSearchParams({
-      action: "opensearch",
-      format: "json",
-      limit: "5",
-      search: primaryEntity,
-    });
-    const osRes = await fetch(`https://justapedia.org/api.php?${osParams.toString()}`, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept: "application/json",
-      },
-      next: { revalidate: 300 },
-    });
-    if (osRes.ok) {
-      const osData = await osRes.json();
-      const titles: string[] = osData[1] || [];
-      const urls: string[] = osData[3] || [];
-      if (titles.length > 0) {
-        return titles.map((title, idx) => ({
-          title,
-          page_id: `page_${encodeURIComponent(title)}`,
-          url:
-            urls[idx] ||
-            `https://justapedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`,
-          snippet: `Justapedia article for ${title}`,
-          score: Math.max(0.4, 0.9 - idx * 0.1),
-        }));
-      }
-    }
-
-    return [];
+    return results;
   } catch {
     return [];
   }
@@ -314,7 +364,6 @@ function parseArticleSections(rawText: string): SectionChunk[] {
     }
   }
 
-  // If no sections detected, return full text as intro
   if (sections.length === 0 && rawText.trim().length > 0) {
     sections.push({ heading: "Overview", text: rawText.trim() });
   }
@@ -351,12 +400,14 @@ async function getArticleFullText(title: string): Promise<string> {
   }
 }
 
-// 4. Reranking Layer
+// 4. Reranking Layer with Semantic Relevance Validation
 function rerankChunks(
   userQuery: string,
   chunks: ArticleChunk[]
 ): ArticleChunk[] {
-  const queryTerms = userQuery.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  const queryLower = userQuery.toLowerCase();
+  const queryTerms = queryLower.split(/\s+/).filter((w) => w.length > 2);
+  const entities = extractSearchEntities(userQuery).map((e) => e.toLowerCase());
 
   return chunks
     .map((chunk) => {
@@ -365,29 +416,41 @@ function rerankChunks(
       const headingLower = chunk.section_heading.toLowerCase();
       const textLower = chunk.chunk_text.toLowerCase();
 
-      // Title match boost
-      if (titleLower.includes(userQuery.toLowerCase())) {
-        score += 1.5;
+      // Entity match boost
+      for (const ent of entities) {
+        if (titleLower.includes(ent)) {
+          score += 4.0;
+        }
       }
 
-      // Query term overlap boost
+      // Query term overlap
+      let termMatches = 0;
       for (const term of queryTerms) {
-        if (titleLower.includes(term)) score += 0.5;
-        if (headingLower.includes(term)) score += 0.4;
-        if (textLower.includes(term)) score += 0.1;
+        if (titleLower.includes(term)) {
+          score += 1.0;
+          termMatches++;
+        }
+        if (headingLower.includes(term)) score += 0.5;
+        if (textLower.includes(term)) score += 0.15;
       }
 
-      // Demote reference/external link sections from primary answer context
+      // Filter out unrelated articles that share only 1 common word
+      if (entities.length > 0 && !entities.some((e) => titleLower.includes(e) || textLower.includes(e))) {
+        score -= 2.0;
+      }
+
+      // Demote reference/external link sections
       if (
         headingLower.includes("references") ||
         headingLower.includes("external links") ||
         headingLower.includes("see also")
       ) {
-        score -= 0.5;
+        score -= 1.0;
       }
 
       return { ...chunk, relevance_score: score };
     })
+    .filter((c) => c.relevance_score > 0.1) // Discard low-relevance noise
     .sort((a, b) => b.relevance_score - a.relevance_score);
 }
 
@@ -486,8 +549,8 @@ export async function POST(req: NextRequest) {
             const fullText = await getArticleFullText(hit.title);
             if (fullText) {
               const sections = parseArticleSections(fullText);
-              // Take top relevant sections (intro + up to 2 others)
-              for (const [secIdx, sec] of sections.slice(0, 3).entries()) {
+              // Take top relevant sections (intro + up to 3 others)
+              for (const [secIdx, sec] of sections.slice(0, 4).entries()) {
                 const chunkId = `chk_${hit.page_id}_${secIdx}`;
                 const chunkData: ArticleChunk = {
                   id: chunkId,
@@ -516,8 +579,26 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // 3. Reranking Layer
-      const rerankedChunks = rerankChunks(resolvedQuery, candidateChunks).slice(0, 6);
+      // 3. Reranking Layer & Strict Subject Isolation
+      const allReranked = rerankChunks(resolvedQuery, candidateChunks);
+      const topTitle = allReranked[0]?.title.toLowerCase();
+      
+      // If we found an exact subject article (e.g. "Albert Einstein"), isolate only relevant chunks
+      const rerankedChunks = allReranked
+        .filter((c) => {
+          if (allReranked[0]?.relevance_score >= 2.0 && topTitle) {
+            return c.title.toLowerCase() === topTitle;
+          }
+          return c.relevance_score > 0.3;
+        })
+        .slice(0, 6);
+
+      const filteredRelatedArticles = relatedArticles.filter((a) => {
+        if (topTitle && allReranked[0]?.relevance_score >= 2.0) {
+          return a.title.toLowerCase() === topTitle;
+        }
+        return true;
+      });
 
       // Initial assistant message placeholder
       controller.enqueue(
@@ -545,6 +626,9 @@ export async function POST(req: NextRequest) {
             )
             .join("\n\n") +
           "\n```\n\n";
+      } else {
+        contextBlock =
+          "No specific Justapedia article was retrieved for this query. Provide a direct, highly accurate, and helpful encyclopedic answer using verified general knowledge.\n\n";
       }
 
       const langRule = responseLanguage
@@ -555,7 +639,7 @@ export async function POST(req: NextRequest) {
         { role: "system", content: `${SYSTEM_PROMPT}\n\n${langRule}` },
         {
           role: "user",
-          content: `${contextBlock}User Question: ${sanitizedMessage}\n\nProvide an accurate, naturally written response matching the user's question length. Follow the core principles strictly.`,
+          content: `${contextBlock}User Question: ${sanitizedMessage}\n\nAnswer the question directly, thoroughly, and professionally. Use the retrieved Justapedia sources where available. If explaining a famous person or concept, detail their key life events, major theories or discoveries, and significance.`,
         },
       ];
 
@@ -671,7 +755,7 @@ export async function POST(req: NextRequest) {
           sseFormat("final", {
             conversation: conversationData,
             message: finalAssistantMessage,
-            related_articles: relatedArticles,
+            related_articles: filteredRelatedArticles,
             suggested_questions: suggested,
           })
         )
