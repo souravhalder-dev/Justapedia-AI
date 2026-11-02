@@ -67,7 +67,16 @@ Core Operating Principles:
   * Complex or explanatory questions (e.g. "What did he discover?", "Explain quantum computing"): provide a comprehensive, structured response (Summary → Core Concepts / Discoveries → Significance).
 
 6. Multilingual Fluency:
-- Always respond in the EXACT SAME language as the user's question (e.g., if asked in English, reply in English; if Bengali, reply in Bengali).`;
+- Always respond in the EXACT SAME language as the user's question (e.g., if asked in English, reply in English; if Bengali, reply in Bengali).
+
+7. Justapedia Editorial Policies & Contributor Assistance:
+- When users ask about editing, creating articles, policies, or community standards, strictly adhere to Justapedia's core pillars:
+  * Neutral Point of View (NPOV): Present all significant viewpoints fairly, proportionately, and without personal bias or editorializing.
+  * Verifiability & Reliable Sources: All factual claims must be attributable to reputable, independent, published sources.
+  * Notability: Topics must have received substantial coverage in reliable secondary sources to warrant an encyclopedia entry.
+  * Conflict of Interest (COI): Editors must avoid self-promotion or writing about topics where they have a financial, personal, or institutional conflict.
+  * Civil Collaboration: Encourage constructive editing, consensus-building, and respectful collaboration.
+- When explaining how to contribute, provide clear, step-by-step guidance on creating an account, following naming conventions, formatting wiki markup, adding references, and previewing edits before publishing.`;
 
 function resolveSearchQuery(
   currentMessage: string,
@@ -76,29 +85,38 @@ function resolveSearchQuery(
   const trimmed = currentMessage.trim();
   const lower = trimmed.toLowerCase();
 
+  // Pattern detection for pronouns, references, and short conversational follow-ups
+  const followUpIndicators = [
+    /\b(it|its|he|him|his|she|her|they|them|their)\b/i,
+    /\b(that|this|these|those)\s+(article|topic|person|event|war|subject|point|issue|matter)\b/i,
+    /\b(previous|former|earlier|above)\s+(answer|response|message|explanation)\b/i,
+    /^(tell me more|explain more|what else|why|how so|and then|what happened next|what caused it|why did it|when was that|where was that|who was that|what about)\b/i,
+    /\b(his early life|her early life|their discoveries|his works|her achievements|after that)\b/i,
+  ];
+
   const isFollowUp =
-    lower.startsWith("what caused it") ||
-    lower.startsWith("why did it") ||
-    lower.startsWith("when was he") ||
-    lower.startsWith("when was she") ||
-    lower.startsWith("who founded it") ||
-    lower.startsWith("tell me more") ||
-    lower.startsWith("explain it") ||
-    lower.startsWith("what was his") ||
-    lower.startsWith("what was her") ||
-    lower.includes(" his ") ||
-    lower.includes(" her ") ||
-    lower.includes(" it ") ||
-    lower.length < 25;
+    lower.length < 32 ||
+    followUpIndicators.some((rx) => rx.test(trimmed));
 
   if (isFollowUp && history.length > 0) {
-    const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
-    if (lastUserMsg) {
-      const cleanedLast = lastUserMsg.content
-        .replace(/^(who is|who was|what is|tell me about|explain)\s+/i, "")
-        .replace(/[?.,!]/g, "")
-        .trim();
-      return `${cleanedLast} ${trimmed}`;
+    // 1. Search backwards through history turns to identify the active subject/article
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i];
+      if (msg.role === "user") {
+        const cleaned = msg.content
+          .replace(/^(who is|who was|what is|what was|tell me about|explain|describe)\s+/i, "")
+          .replace(/[?.,!]/g, "")
+          .trim();
+        if (cleaned.length > 3) {
+          return `${cleaned} ${trimmed}`;
+        }
+      } else if (msg.role === "assistant") {
+        // Extract wikilinked topics from the assistant's previous answer: [Topic](url)
+        const match = msg.content.match(/\[([A-Z][^\]]+)\]\(https:\/\/justapedia\.org\/wiki\//);
+        if (match && match[1]) {
+          return `${match[1]} ${trimmed}`;
+        }
+      }
     }
   }
 
@@ -266,11 +284,11 @@ export async function POST(req: NextRequest) {
         encoder.encode(sseFormat("status", { message: "Exploring Justapedia knowledge..." }))
       );
 
-      // Fetch last 4 messages for conversational context
+      // Fetch up to last 12 messages for robust conversation memory & context tracking
       let history: DbMessage[] = [];
       try {
         history = await queryDb<DbMessage>(
-          "SELECT id, conversation_id, role, content, status, model, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at DESC LIMIT 4",
+          "SELECT id, conversation_id, role, content, status, model, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at DESC LIMIT 12",
           [conversationId]
         );
         history.reverse();
@@ -405,14 +423,22 @@ export async function POST(req: NextRequest) {
         ? `Respond completely in ${responseLanguage}.`
         : "Always respond in the exact same language as the user's prompt (e.g. if the user asks in English, reply in English; if Bengali, reply in Bengali).";
 
-      // Prepare previous conversation history turns (up to last 6 turns)
-      const historyTurns = history
-        .filter((h) => h.content && h.content.trim() && h.id !== userMessageId)
-        .slice(-6)
-        .map((h) => ({
+      // Prepare previous conversation history turns (sliding window of up to 10 turns with token budget)
+      const validHistory = history.filter(
+        (h) => h.content && h.content.trim() && h.id !== userMessageId
+      );
+      let historyBudgetChars = 3000;
+      const historyTurns: { role: "user" | "assistant"; content: string }[] = [];
+      for (let i = validHistory.length - 1; i >= 0; i--) {
+        const h = validHistory[i];
+        if (historyBudgetChars <= 0) break;
+        historyBudgetChars -= h.content.length;
+        historyTurns.unshift({
           role: (h.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
-          content: h.content,
-        }));
+          content: h.content.slice(0, 900), // Prevent any single long response from flooding the prompt
+        });
+        if (historyTurns.length >= 10) break;
+      }
 
       const promptMessages = [
         { role: "system", content: `${SYSTEM_PROMPT}\n\n${langRule}` },
