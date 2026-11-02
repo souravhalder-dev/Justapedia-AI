@@ -69,7 +69,41 @@ export function isProviderAvailable(id: string): boolean {
 export function getAvailableProviders(): ProviderConfig[] {
   const providers: ProviderConfig[] = [];
 
-  // 1. OpenRouter Free Cluster (Primary - Configured with user's active key and free models)
+  // 1. Groq LPU Engine (Ultra-Fast 100-200ms inference, 30 RPM, 14,400 RPD)
+  const groqKey = process.env.GROQ_API_KEY || "";
+  if (groqKey) {
+    providers.push({
+      id: "groq",
+      name: "Groq LPU Engine",
+      url: "https://api.groq.com/openai/v1/chat/completions",
+      headers: {
+        Authorization: `Bearer ${groqKey}`,
+        "Content-Type": "application/json",
+      },
+      fastModels: ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "allam-2-7b"],
+      strongModels: ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
+      maxTokens: 2048,
+    });
+  }
+
+  // 2. Google Gemini Free Engine (High Intelligence & encyclopedic accuracy, 15 RPM, 1,500 RPD)
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+  if (geminiKey) {
+    providers.push({
+      id: "gemini",
+      name: "Google Gemini Free Engine",
+      url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      headers: {
+        Authorization: `Bearer ${geminiKey}`,
+        "Content-Type": "application/json",
+      },
+      fastModels: ["gemini-flash-lite-latest", "gemini-3.5-flash"],
+      strongModels: ["gemini-3.5-flash", "gemini-flash-lite-latest"],
+      maxTokens: 2048,
+    });
+  }
+
+  // 3. OpenRouter Free Cluster (Community Free Tier Cluster)
   const openRouterKey = process.env.OPENROUTER_API_KEY || "";
   if (openRouterKey) {
     providers.push({
@@ -96,24 +130,7 @@ export function getAvailableProviders(): ProviderConfig[] {
     });
   }
 
-  // 2. Groq API (Free Tier: 30 RPM, 14,400 RPD, 500-1000 tokens/sec)
-  const groqKey = process.env.GROQ_API_KEY || "";
-  if (groqKey) {
-    providers.push({
-      id: "groq",
-      name: "Groq LPU Engine",
-      url: "https://api.groq.com/openai/v1/chat/completions",
-      headers: {
-        Authorization: `Bearer ${groqKey}`,
-        "Content-Type": "application/json",
-      },
-      fastModels: ["llama-3.1-8b-instant"],
-      strongModels: ["llama-3.3-70b-versatile"],
-      maxTokens: 2048,
-    });
-  }
-
-  // 3. Cerebras Inference (Free Tier: 30 RPM, 1,800+ tokens/sec)
+  // 4. Cerebras Inference (Free CS-3 Engine if key is provided)
   const cerebrasKey = process.env.CEREBRAS_API_KEY || "";
   if (cerebrasKey) {
     providers.push({
@@ -126,23 +143,6 @@ export function getAvailableProviders(): ProviderConfig[] {
       },
       fastModels: ["llama3.1-8b"],
       strongModels: ["llama-3.3-70b"],
-      maxTokens: 2048,
-    });
-  }
-
-  // 4. Google Gemini API (Free Tier: 15 RPM, 1,500 RPD)
-  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
-  if (geminiKey) {
-    providers.push({
-      id: "gemini",
-      name: "Google Gemini Free Engine",
-      url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      headers: {
-        Authorization: `Bearer ${geminiKey}`,
-        "Content-Type": "application/json",
-      },
-      fastModels: ["gemini-2.0-flash-lite"],
-      strongModels: ["gemini-2.0-flash"],
       maxTokens: 2048,
     });
   }
