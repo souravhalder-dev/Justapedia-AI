@@ -69,24 +69,7 @@ export function isProviderAvailable(id: string): boolean {
 export function getAvailableProviders(): ProviderConfig[] {
   const providers: ProviderConfig[] = [];
 
-  // 1. Groq LPU Engine (Ultra-Fast 100-200ms inference, 30 RPM, 14,400 RPD)
-  const groqKey = process.env.GROQ_API_KEY || "";
-  if (groqKey) {
-    providers.push({
-      id: "groq",
-      name: "Groq LPU Engine",
-      url: "https://api.groq.com/openai/v1/chat/completions",
-      headers: {
-        Authorization: `Bearer ${groqKey}`,
-        "Content-Type": "application/json",
-      },
-      fastModels: ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "allam-2-7b"],
-      strongModels: ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
-      maxTokens: 2048,
-    });
-  }
-
-  // 2. Google Gemini Free Engine (High Intelligence & encyclopedic accuracy, 15 RPM, 1,500 RPD)
+  // 1. Google Gemini Free Engine (High Intelligence, Verified Encyclopedic Accuracy, 15 RPM, 1,500 RPD)
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
   if (geminiKey) {
     providers.push({
@@ -103,7 +86,7 @@ export function getAvailableProviders(): ProviderConfig[] {
     });
   }
 
-  // 3. OpenRouter Free Cluster (Community Free Tier Cluster)
+  // 2. OpenRouter NVIDIA Cluster (Flagship 550B Parameters & High Accuracy)
   const openRouterKey = process.env.OPENROUTER_API_KEY || "";
   if (openRouterKey) {
     providers.push({
@@ -126,6 +109,23 @@ export function getAvailableProviders(): ProviderConfig[] {
         "nvidia/nemotron-3.5-lightning:free",
         "liquid/lfm-2.5-2.6b:free",
       ],
+      maxTokens: 2048,
+    });
+  }
+
+  // 3. Groq LPU Engine (Ultra-Fast 100-200ms failover, 30 RPM, 14,400 RPD)
+  const groqKey = process.env.GROQ_API_KEY || "";
+  if (groqKey) {
+    providers.push({
+      id: "groq",
+      name: "Groq LPU Engine",
+      url: "https://api.groq.com/openai/v1/chat/completions",
+      headers: {
+        Authorization: `Bearer ${groqKey}`,
+        "Content-Type": "application/json",
+      },
+      fastModels: ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"],
+      strongModels: ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"],
       maxTokens: 2048,
     });
   }

@@ -50,7 +50,7 @@ export const STOP_WORDS = new Set([
   "over", "through", "throughout", "till", "to", "toward", "towards", "under", "underneath", "until",
   "up", "upon", "with", "within", "without",
   // Meta chat & wiki words
-  "article", "articles", "page", "pages", "justapedia", "wikipedia", "chat", "response", "answer",
+  "article", "articles", "page", "pages", "chat", "response", "answer",
   "tell", "explain", "describe", "show", "give", "craft", "crafted", "wrote", "written", "said",
   "first", "second", "third", "last", "previous", "follows", "following", "use", "used", "using",
   "address", "addresses", "addressed", "mention", "mentioned", "particular", "another", "same",
@@ -60,6 +60,14 @@ export const STOP_WORDS = new Set([
 export function extractSearchEntities(rawQuery: string): string[] {
   const candidates: string[] = [];
   const q = rawQuery.trim();
+
+  // Explicit priority for Justapedia project inquiries
+  if (/\bjustapedia\b/i.test(q)) {
+    candidates.push("Justapedia");
+    if (/\b(foundation|nonprofit|organization)\b/i.test(q)) {
+      candidates.push("Justapedia Foundation");
+    }
+  }
 
   // 1. Quoted phrases: e.g. "Russo-Ukrainian War"
   const quoted = q.match(/["'“‘]([^"'”’]+)["'”’]/g);

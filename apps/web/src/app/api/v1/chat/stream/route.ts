@@ -416,7 +416,7 @@ export async function POST(req: NextRequest) {
             .join("\n\n") +
           "\n```\n\n" +
           `Available Justapedia Articles to Wikilink:\n${articleLinksHint}\n\n` +
-          "Wikilink Instruction: Naturally embed inline markdown links [Article Title](https://justapedia.org/wiki/Article_Title) or wiki syntax [[Article Title]] when mentioning these subjects in your prose. Do not append a separate source list at the bottom.\n\n";
+          "Strict Grounding Instruction: Ground your factual answer directly on the retrieved Justapedia knowledge whenever relevant. Never contradict verified dates, names, or historical facts stated in the source text. Naturally embed inline markdown links [Article Title](https://justapedia.org/wiki/Article_Title) or wiki syntax [[Article Title]] when mentioning these subjects. Do not append a separate source list at the bottom.\n\n";
       }
 
       const langRule = responseLanguage
@@ -493,7 +493,7 @@ export async function POST(req: NextRequest) {
               model,
               messages: promptMessages,
               stream: true,
-              temperature: 0.3,
+              temperature: 0.15,
               max_tokens: provider.maxTokens || 2048,
             };
 
