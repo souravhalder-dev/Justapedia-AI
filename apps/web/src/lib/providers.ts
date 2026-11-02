@@ -45,8 +45,8 @@ export function recordProviderSuccess(id: string, latencyMs: number, ttftMs: num
 export function recordProviderFailure(id: string, isRateLimit: boolean = false) {
   const h = getHealth(id);
   h.consecutiveFailures++;
-  // Open circuit breaker for 60s on rate limit, or 30s on repeated errors
-  const cooldownSec = isRateLimit ? 60 : h.consecutiveFailures >= 2 ? 30 : 5;
+  // Brief cooldown: 10s on rate limit, or 5s on error so subsequent requests are not blocked
+  const cooldownSec = isRateLimit ? 10 : 5;
   h.circuitOpenUntil = Date.now() + cooldownSec * 1000;
   console.warn(`[CircuitBreaker] Provider ${id} tripped. Cooldown: ${cooldownSec}s.`);
 }
@@ -69,7 +69,34 @@ export function isProviderAvailable(id: string): boolean {
 export function getAvailableProviders(): ProviderConfig[] {
   const providers: ProviderConfig[] = [];
 
-  // 1. Groq API (Free Tier: 30 RPM, 14,400 RPD, 500-1000 tokens/sec)
+  // 1. OpenRouter Free Cluster (Primary - Configured with user's active key and free models)
+  const openRouterKey = process.env.OPENROUTER_API_KEY || "";
+  if (openRouterKey) {
+    providers.push({
+      id: "openrouter",
+      name: "OpenRouter Free Cluster",
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      headers: {
+        Authorization: `Bearer ${openRouterKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://justapedia.org",
+        "X-Title": "Justapedia AI",
+      },
+      fastModels: [
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "liquid/lfm-2.5-2.6b:free",
+      ],
+      strongModels: [
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "liquid/lfm-2.5-2.6b:free",
+      ],
+      maxTokens: 2048,
+    });
+  }
+
+  // 2. Groq API (Free Tier: 30 RPM, 14,400 RPD, 500-1000 tokens/sec)
   const groqKey = process.env.GROQ_API_KEY || "";
   if (groqKey) {
     providers.push({
@@ -86,7 +113,7 @@ export function getAvailableProviders(): ProviderConfig[] {
     });
   }
 
-  // 2. Cerebras Inference (Free Tier: 30 RPM, 1,800+ tokens/sec)
+  // 3. Cerebras Inference (Free Tier: 30 RPM, 1,800+ tokens/sec)
   const cerebrasKey = process.env.CEREBRAS_API_KEY || "";
   if (cerebrasKey) {
     providers.push({
@@ -103,7 +130,7 @@ export function getAvailableProviders(): ProviderConfig[] {
     });
   }
 
-  // 3. Google Gemini API (Free Tier: 15 RPM, 1,500 RPD)
+  // 4. Google Gemini API (Free Tier: 15 RPM, 1,500 RPD)
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
   if (geminiKey) {
     providers.push({
@@ -119,63 +146,6 @@ export function getAvailableProviders(): ProviderConfig[] {
       maxTokens: 2048,
     });
   }
-
-  // 4. OpenRouter Free Tier (Configured with verified active models)
-  const openRouterKey = process.env.OPENROUTER_API_KEY || "";
-  if (openRouterKey) {
-    providers.push({
-      id: "openrouter",
-      name: "OpenRouter Free Cluster",
-      url: "https://openrouter.ai/api/v1/chat/completions",
-      headers: {
-        Authorization: `Bearer ${openRouterKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://justapedia.org",
-        "X-Title": "Justapedia AI",
-      },
-      fastModels: [
-        "liquid/lfm-2.5-2.6b:free",
-        "nvidia/nemotron-3-ultra-550b-a55b:free",
-      ],
-      strongModels: [
-        "nvidia/nemotron-3-ultra-550b-a55b:free",
-        "google/gemma-4-31b-it:free",
-        "nvidia/nemotron-3.5-lightning:free",
-      ],
-      maxTokens: 2048,
-    });
-  }
-
-  // 5. Vercel AI Gateway (If present)
-  const vercelGatewayKey =
-    process.env.VERCEL_AI_GATEWAY_KEY || process.env.AI_GATEWAY_API_KEY || "";
-  if (vercelGatewayKey) {
-    providers.push({
-      id: "vercel_gateway",
-      name: "Vercel AI Gateway",
-      url: "https://ai-gateway.vercel.sh/v1/chat/completions",
-      headers: {
-        Authorization: `Bearer ${vercelGatewayKey}`,
-        "Content-Type": "application/json",
-      },
-      fastModels: ["google/gemini-2.0-flash"],
-      strongModels: ["meta/llama-3.3-70b", "google/gemini-2.0-flash"],
-      maxTokens: 2048,
-    });
-  }
-
-  // 6. Zero-Config High-Availability Free Failover (100% Free Uptime Guarantee)
-  providers.push({
-    id: "pollinations",
-    name: "Justapedia High-Availability Engine",
-    url: "https://text.pollinations.ai/openai/chat/completions",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    fastModels: ["openai", "mistral"],
-    strongModels: ["openai", "mistral"],
-    maxTokens: 2048,
-  });
 
   return providers;
 }

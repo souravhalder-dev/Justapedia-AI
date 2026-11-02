@@ -27,8 +27,11 @@ import {
   rerankChunks,
   ArticleChunk,
 } from "@/lib/retrieval";
+import { chatModel } from "@/lib/langchain";
 
-const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, professional, and helpful knowledge assistant for Justapedia (https://justapedia.org). Your purpose is to help readers, researchers, editors, and contributors explore and understand knowledge in a direct, natural, and engaging style similar to ChatGPT.
+const SYSTEM_PROMPT = `You are Justapedia AI, an intelligent, professional, and helpful knowledge assistant for Justapedia (https://justapedia.org). Your purpose is to help readers, researchers, editors, and contributors explore and understand knowledge in a direct, natural, and engaging style.
+
+CRITICAL IDENTITY RULE: You are Justapedia AI, powered by open knowledge and open-source models for Justapedia. NEVER identify yourself as OpenAI, ChatGPT, or GPT-4, and never mention third-party AI limits. You represent Justapedia.
 
 Core Operating Principles:
 
@@ -450,26 +453,38 @@ export async function POST(req: NextRequest) {
           const providerStart = Date.now();
           const abortController = new AbortController();
 
-          // 4.5s First-Token Timeout: If no token within 4.5s, trip to next provider immediately!
+          // 12s First-Token Timeout: Prevents premature aborts while queueing on free inference clusters
           let hasFirstToken = false;
           const timeoutId = setTimeout(() => {
             if (!hasFirstToken) {
               abortController.abort();
-              console.warn(`[Timeout] ${provider.name} (${model}) did not send first token in 4.5s.`);
+              console.warn(`[Timeout] ${provider.name} (${model}) did not send first token in 12s.`);
             }
-          }, 4500);
+          }, 12000);
 
           try {
+            const requestPayload: Record<string, unknown> = {
+              model,
+              messages: promptMessages,
+              stream: true,
+              temperature: 0.3,
+              max_tokens: provider.maxTokens || 2048,
+            };
+
+            // Enable automatic provider-side model fallback on OpenRouter
+            if (provider.id === "openrouter") {
+              requestPayload.models = [
+                model,
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "nvidia/nemotron-3.5-lightning:free",
+                "liquid/lfm-2.5-2.6b:free",
+              ];
+            }
+
             const res = await fetch(provider.url, {
               method: "POST",
               headers: provider.headers,
-              body: JSON.stringify({
-                model,
-                messages: promptMessages,
-                stream: true,
-                temperature: 0.3,
-                max_tokens: provider.maxTokens || 2048,
-              }),
+              body: JSON.stringify(requestPayload),
               signal: abortController.signal,
             });
 
@@ -495,12 +510,6 @@ export async function POST(req: NextRequest) {
               const { done, value } = await reader.read();
               if (done) break;
 
-              if (!hasFirstToken) {
-                hasFirstToken = true;
-                clearTimeout(timeoutId);
-                ttftMs = Date.now() - startTime;
-              }
-
               lineBuffer += decoder.decode(value, { stream: true });
               const lines = lineBuffer.split("\n");
               lineBuffer = lines.pop() ?? "";
@@ -519,6 +528,15 @@ export async function POST(req: NextRequest) {
                       parsed.choices?.[0]?.delta?.content ||
                       parsed.choices?.[0]?.text ||
                       "";
+                    const reasoningDelta =
+                      parsed.choices?.[0]?.delta?.reasoning || "";
+
+                    // If reasoning or content has arrived, mark first token received to stop timeout
+                    if (!hasFirstToken && (delta || reasoningDelta)) {
+                      hasFirstToken = true;
+                      clearTimeout(timeoutId);
+                      ttftMs = Date.now() - startTime;
+                    }
 
                     if (delta) {
                       fullAnswer += delta;
@@ -547,11 +565,51 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Robust fallback if all streaming attempts were exhausted
+      // Robust fallback 1: LangChain ChatOpenAI with automatic retry logic
       if (!modelSuccess || !fullAnswer.trim()) {
-        fullAnswer =
-          "I apologize, but I am experiencing high inquiry volume on the free inference clusters. Please try repeating your query in a moment.";
-        controller.enqueue(encoder.encode(sseFormat("chunk", { text: fullAnswer })));
+        try {
+          console.log("[Fallback] Invoking LangChain chatModel fallback...");
+          const langChainRes = await chatModel.invoke(promptMessages);
+          const answerText =
+            typeof langChainRes.content === "string"
+              ? langChainRes.content
+              : Array.isArray(langChainRes.content)
+              ? langChainRes.content
+                  .map((c) => (typeof c === "string" ? c : JSON.stringify(c)))
+                  .join("")
+              : "";
+
+          if (answerText && answerText.trim().length > 10) {
+            fullAnswer = answerText.trim();
+            modelSuccess = true;
+            usedModelName = "nvidia/nemotron-3-ultra-550b-a55b:free";
+            usedProviderId = "Justapedia AI (LangChain)";
+            // Stream the response smoothly in small chunks
+            const chunkSize = 24;
+            for (let i = 0; i < fullAnswer.length; i += chunkSize) {
+              const slice = fullAnswer.slice(i, i + chunkSize);
+              controller.enqueue(encoder.encode(sseFormat("chunk", { text: slice })));
+            }
+          }
+        } catch (langChainErr) {
+          console.warn("[Fallback] LangChain fallback error:", langChainErr);
+        }
+      }
+
+      // Robust fallback 2: Synthesize directly from retrieved Justapedia knowledge
+      if (!modelSuccess || !fullAnswer.trim()) {
+        if (rerankedChunks.length > 0) {
+          const mainChunk = rerankedChunks[0];
+          fullAnswer = `${mainChunk.chunk_text}\n\n*Read more on Justapedia: [${mainChunk.title}](${mainChunk.url})*`;
+          modelSuccess = true;
+          usedModelName = "Justapedia Knowledge Core";
+          usedProviderId = "Justapedia Engine";
+          controller.enqueue(encoder.encode(sseFormat("chunk", { text: fullAnswer })));
+        } else {
+          fullAnswer =
+            "I am ready to assist you with Justapedia articles, research, and general encyclopedic knowledge. Please ask any specific question to get started!";
+          controller.enqueue(encoder.encode(sseFormat("chunk", { text: fullAnswer })));
+        }
       }
 
       const totalTimeMs = Date.now() - startTime;
